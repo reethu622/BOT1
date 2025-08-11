@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Medibot</title>
+<style>
+  body {
+    font-family: Arial, sans-serif;
+    max-width: 700px;
+    margin: auto;
+    padding: 20px;
+    background: #f9f9f9;
+  }
+  h1 {
+    text-align: center;
+    margin-bottom: 20px;
+    font-family: 'Trebuchet MS', sans-serif;
+    font-size: 2.5em;
+    font-weight: bold;
+    color: #333;
+    background: linear-gradient(90deg, #ff7e5f, #feb47b);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    text-shadow: 1px 1px 2px rgba(0,0,0,0.1);
+  }
+  .chat-box {
+    border: 1px solid #ccc;
+    border-radius: 8px;
+    padding: 10px;
+    height: 400px;
+    overflow-y: auto;
+    background: white;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .message {
+    max-width: 75%;
+    padding: 10px 14px;
+    border-radius: 15px;
+    word-wrap: break-word;
+    white-space: pre-wrap;
+    line-height: 1.4;
+  }
+  .message.user {
+    align-self: flex-end;
+    background-color: #f0f0f0;
+    color: #333333;
+    border-bottom-right-radius: 0;
+    text-align: right;
+  }
+  .message.bot {
+    align-self: flex-start;
+    background-color: #e8e8e8;
+    color: #222222;
+    border-bottom-left-radius: 0;
+    text-align: left;
+  }
+  .user-label, .bot-label {
+    font-weight: 600;
+    color: #222;
+    margin-right: 6px;
+  }
+  .input-area {
+    margin-top: 15px;
+    display: flex;
+    gap: 8px;
+  }
+  input[type="text"] {
+    flex-grow: 1;
+    font-size: 16px;
+    padding: 10px 14px;
+    border: 1px solid #ccc;
+    border-radius: 25px;
+    outline: none;
+  }
+  input[type="text"]:focus {
+    border-color: #1E90FF;
+  }
+  button {
+    background-color: #1E90FF;
+    border: none;
+    color: white;
+    cursor: pointer;
+    padding: 10px 16px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background-color 0.3s ease;
+  }
+  button:hover {
+    background-color: #0b6fc3;
+  }
+  .send-icon {
+    width: 20px;
+    height: 20px;
+    fill: white;
+  }
+  .sources-list {
+    padding-left: 20px;
+    margin-top: 6px;
+    margin-bottom: 0;
+  }
+  .sources-list li {
+    margin-bottom: 4px;
+  }
+  .sources-list a {
+    color: #1E90FF;
+    text-decoration: none;
+  }
+  #loading {
+    margin-top: 8px;
+    color: #555;
+    font-style: italic;
+    display: none;
+  }
+</style>
+</head>
+<body>
+  <h1>Medibot 🤖</h1>
+  <div class="chat-box" id="chat-box">
+    <div class="message bot"><span class="bot-label">Medibot:</span> Hello! 👋 I'm Medibot, your Medi Assistant. How may I help you today?</div>
+  </div>
+  <form id="chat-form" class="input-area" autocomplete="off">
+    <input type="text" id="user-input" placeholder="Ask a medical question..." />
+    <button type="submit" id="send-btn" title="Send">
+      <svg class="send-icon" viewBox="0 0 24 24"><path d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
+    </button>
+  </form>
+  <div id="loading">Medibot is typing...</div>
+
+<script>
+  const chatBox = document.getElementById("chat-box");
+  const chatForm = document.getElementById("chat-form");
+  const userInput = document.getElementById("user-input");
+  const loadingDiv = document.getElementById("loading");
+  const sendBtn = document.getElementById("send-btn");
+
+  const messages = [
+    { role: "system", content: "You are Medibot, a helpful medical assistant." },
+    { role: "assistant", content: "Hello! 👋 I'm Medibot, your Medi Assistant. How may I help you today?" }
+  ];
+
+  function appendMessage(content, sender) {
+    const msgDiv = document.createElement("div");
+    msgDiv.classList.add("message", sender);
+    msgDiv.innerHTML = sender === "user"
+      ? `<span class="user-label">You:</span> ${content}`
+      : `<span class="bot-label">Medibot:</span> ${content}`;
+    chatBox.appendChild(msgDiv);
+    chatBox.scrollTop = chatBox.scrollHeight;
+  }
+
+  function displayMessage(text, sources = []) {
+    const msgDiv = document.createElement("div");
+    msgDiv.classList.add("message", "bot");
+
+    let html = `<span class="bot-label">Medibot:</span> ${text}`;
+    if (sources.length > 0) {
+      html += `<br/><strong>Sources:</strong><ul class="sources-list">`;
+      sources.forEach((src, idx) => {
+        html += `<li>[${idx + 1}] <a href="${src.link}" target="_blank" rel="noopener noreferrer">${src.title}</a></li>`;
+      });
+      html += "</ul>";
+    }
+    msgDiv.innerHTML = html;
+    chatBox.appendChild(msgDiv);
+    chatBox.scrollTop = chatBox.scrollHeight;
+  }
+
+  async function sendQuestion() {
+    const question = userInput.value.trim();
+    if (!question) return;
+
+    appendMessage(question, "user");
+    messages.push({ role: "user", content: question });
+    userInput.value = "";
+    sendBtn.disabled = true;
+    loadingDiv.style.display = "block";
+
+    try {
+      const response = await fetch("/api/v1/search_answer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages }),
+      });
+      const data = await response.json();
+      messages.push({ role: "assistant", content: data.answer });
+      displayMessage(data.answer || "Sorry, I couldn't find an answer.", data.sources || []);
+    } catch (err) {
+      loadingDiv.style.display = "none";
+      appendMessage("Error: Unable to get response.", "bot");
+      console.error(err);
+    } finally {
+      loadingDiv.style.display = "none";
+      sendBtn.disabled = false;
+      userInput.focus();
+    }
+  }
+
+  chatForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    sendQuestion();
+  });
+
+  userInput.focus();
+</script>
+</body>
+</html>
+
+
+
+

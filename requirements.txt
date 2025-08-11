@@ -1,0 +1,9 @@
+Flask
+flask-cors
+requests
+openai
+google-generativeai
+gunicorn
+spacy 
+scispacy
+en-core-sci-sm @ https://github.com/allenai/scispacy/releases/download/v0.5.1/en_core_sci_sm-0.5.1.tar.gz
