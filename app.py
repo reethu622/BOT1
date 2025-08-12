@@ -161,25 +161,39 @@ def generate_answer_with_sources(messages, results, last_topic=None):
 
 def get_last_medical_topic(messages):
     """
-    Extract medical entities from user messages using scispaCy NLP,
-    return the most recent relevant entity as last topic.
+    Extract medical entities from the latest user message first,
+    if none found, check previous messages until found.
+    Returns the most recent relevant medical entity as last topic (lowercase).
     """
     for msg in reversed(messages):
-        if msg.get("role") != "user":
-            continue
-        text = msg.get("content", "")
-        doc = nlp(text)
-        # Extract entities labeled as DISEASE, DISORDER, SYMPTOM, CONDITION in scispaCy
-        entities = [ent.text for ent in doc.ents if ent.label_ in {"DISEASE", "DISORDER", "SYMPTOM", "CONDITION"}]
-        if entities:
-            return entities[0].lower()
+        if msg.get("role") == "user":
+            text = msg.get("content", "")
+            doc = nlp(text)
+            # Extract entities labeled as DISEASE, DISORDER, SYMPTOM, CONDITION
+            entities = [ent.text for ent in doc.ents if ent.label_ in {"DISEASE", "DISORDER", "SYMPTOM", "CONDITION"}]
+            if entities:
+                return entities[0].lower()
     return None
+
+def contains_medical_entity(text):
+    """Returns True if text contains any medical entities."""
+    doc = nlp(text)
+    for ent in doc.ents:
+        if ent.label_ in {"DISEASE", "DISORDER", "SYMPTOM", "CONDITION"}:
+            return True
+    return False
 
 def rewrite_query(query, last_topic):
     """
-    Replace ambiguous pronouns with last_topic if found.
+    Replace ambiguous pronouns with last_topic if:
+    - last_topic exists
+    - query itself does NOT contain a new medical entity (topic)
     """
     if not last_topic:
+        return query
+
+    if contains_medical_entity(query):
+        # User asked about a new topic explicitly; don't replace pronouns
         return query
 
     pronouns = ["it", "those", "these", "that", "them"]
@@ -214,21 +228,23 @@ def search_answer():
     if latest_user_message.lower() in greetings:
         return jsonify({"answer": "Hi! How may I help you with your medical questions today?", "sources": []})
 
+    # Updated get_last_medical_topic to detect latest entity from current message or past
     last_topic = get_last_medical_topic(messages)
+
+    # Use improved rewrite_query to replace pronouns only if safe
     search_query = rewrite_query(latest_user_message, last_topic)
 
     results, _ = google_search_with_citations(search_query, num_results=5, broad=False)
     extracted_types = extract_types_from_snippets(results, topic=last_topic)
     answer = generate_answer_with_sources(messages, results, last_topic=last_topic)
 
-    # If the user asks about "types" but no types info found, do fallback search forcing "types of <topic>"
+    # Handle 'types' question fallback as before
     if "type" in latest_user_message.lower() and not extracted_types:
         fallback_query = f"types of {last_topic}" if last_topic else latest_user_message
         fallback_results, _ = google_search_with_citations(fallback_query, num_results=10, broad=False)
         answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
         return jsonify({"answer": answer, "sources": fallback_results})
 
-    # If answer is incomplete, fallback to broader search
     if is_answer_incomplete(answer, latest_user_message):
         fallback_results, _ = google_search_with_citations(search_query, num_results=15, broad=True)
         answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
@@ -243,6 +259,7 @@ def serve_index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
