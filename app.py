@@ -113,6 +113,8 @@ def generate_answer_with_sources(messages, results, last_topic=None):
 
     system_prompt = (
         "You are a helpful and knowledgeable medical assistant chatbot. "
+        "Provide concise, clear, and medically relevant answers based strictly on the following web search results. "
+        "Avoid unnecessary details and focus on directly answering the user's question. "
         "When the user uses pronouns like 'it', 'those', 'these', or says 'explain that', "
         "infer that they mean the most recent medical topic or condition discussed earlier in the conversation. "
         "Always keep track of conversational context carefully. "
@@ -259,6 +261,7 @@ def serve_index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
