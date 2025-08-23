@@ -25,7 +25,7 @@ CORS(app)
 # Load scispaCy model once
 nlp = spacy.load("en_core_sci_sm")
 
-# Basic abusive words list (expand as needed)
+# Basic abusive words list
 ABUSIVE_WORDS = ["idiot", "stupid", "dumb", "hate", "shut up", "fool", "damn", "bastard", "crap"]
 
 def contains_abuse(text):
@@ -205,10 +205,24 @@ def search_answer():
 
     results, _ = google_search_with_citations(search_query, num_results=5, broad=False)
 
-    # Post-filter irrelevant results (keep only topic-relevant ones)
+    # Strictly filter irrelevant results
     if last_topic:
-        results = [r for r in results if last_topic.lower() in r.get("snippet", "").lower()
-                   or last_topic.lower() in r.get("title", "").lower()]
+        results = [
+            r for r in results
+            if last_topic.lower() in r.get("snippet", "").lower()
+            or last_topic.lower() in r.get("title", "").lower()
+            or last_topic.lower() in r.get("link", "").lower()
+        ]
+
+    # If no relevant results, fallback to trusted medical sites only
+    if not results and last_topic:
+        trusted_sites = [
+            "mayoclinic.org", "cdc.gov", "nih.gov", "niddk.nih.gov",
+            "medlineplus.gov", "clevelandclinic.org", "hopkinsmedicine.org"
+        ]
+        site_filter = " OR ".join([f"site:{s}" for s in trusted_sites])
+        fallback_query = f"{last_topic} types {site_filter}"
+        results, _ = google_search_with_citations(fallback_query, num_results=5, broad=False)
 
     extracted_types = extract_types_from_snippets(results, topic=last_topic)
     answer = generate_answer_with_sources(messages, results, last_topic=last_topic)
@@ -220,11 +234,28 @@ def search_answer():
         else:
             fallback_query = latest_user_message
         fallback_results, _ = google_search_with_citations(fallback_query, num_results=10, broad=False)
+
+        # Apply strict filtering again
+        if last_topic:
+            fallback_results = [
+                r for r in fallback_results
+                if last_topic.lower() in r.get("snippet", "").lower()
+                or last_topic.lower() in r.get("title", "").lower()
+                or last_topic.lower() in r.get("link", "").lower()
+            ]
+
         answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
         return jsonify({"answer": answer, "sources": fallback_results})
 
     if is_answer_incomplete(answer, latest_user_message):
         fallback_results, _ = google_search_with_citations(search_query, num_results=15, broad=True)
+        if last_topic:
+            fallback_results = [
+                r for r in fallback_results
+                if last_topic.lower() in r.get("snippet", "").lower()
+                or last_topic.lower() in r.get("title", "").lower()
+                or last_topic.lower() in r.get("link", "").lower()
+            ]
         answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
         return jsonify({"answer": answer, "sources": fallback_results})
 
