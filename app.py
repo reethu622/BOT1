@@ -28,11 +28,16 @@ nlp = spacy.load("en_core_sci_sm")
 # Basic abusive words list
 ABUSIVE_WORDS = ["idiot", "stupid", "dumb", "hate", "shut up", "fool", "damn", "bastard", "crap"]
 
-# Trusted medical sites
-TRUSTED_SITES = [
-    "mayoclinic.org", "cdc.gov", "nih.gov", "medlineplus.gov",
-    "clevelandclinic.org", "hopkinsmedicine.org"
-]
+# Trusted site categories
+TOPIC_SITE_MAP = {
+    "medical": [
+        "mayoclinic.org", "cdc.gov", "nih.gov", "medlineplus.gov",
+        "clevelandclinic.org", "hopkinsmedicine.org"
+    ],
+    "insurance": [
+        "medicare.gov", "medicaid.gov", "hhs.gov", "healthcare.gov"
+    ]
+}
 
 def contains_abuse(text):
     text = text.lower()
@@ -140,7 +145,7 @@ def get_last_medical_topic(messages):
             entities = [ent.text for ent in doc.ents if ent.label_ in {"DISEASE", "DISORDER", "SYMPTOM", "CONDITION"}]
             if entities:
                 return entities[0].lower()
-            match = re.search(r"\b(arthritis|diabetes|cancer|asthma|hypertension|migraine|obesity)\b", text, re.I)
+            match = re.search(r"\b(arthritis|diabetes|cancer|asthma|hypertension|migraine|obesity|medicare|medicaid|hipaa)\b", text, re.I)
             if match:
                 return match.group(0).lower()
     return None
@@ -179,14 +184,19 @@ def search_answer():
     last_topic = get_last_medical_topic(messages)
     search_query = rewrite_query(latest_user_message, last_topic)
 
-    results, _ = google_search_with_citations(search_query, num_results=5, broad=False)
+    # 🔹 Decide which trusted sites to use based on topic (medical vs insurance)
+    chosen_sites = TOPIC_SITE_MAP["medical"]
+    if last_topic and last_topic in ["medicare", "medicaid", "hipaa"]:
+        chosen_sites = TOPIC_SITE_MAP["insurance"]
 
-    if last_topic:
-        results = [r for r in results if last_topic.lower() in (r.get("title", "") + r.get("snippet", "") + r.get("link", "")).lower()]
+    site_filter = " OR ".join([f"site:{s}" for s in chosen_sites])
+    search_query = f"{search_query} {site_filter}"
+
+    results, _ = google_search_with_citations(search_query, num_results=10, broad=False)
 
     # Special handling for 'types' queries
-    if "type" in latest_user_message.lower() and last_topic:
-        site_filter = " OR ".join([f"site:{s}" for s in TRUSTED_SITES])
+    if "type" in latest_user_message.lower() and last_topic and last_topic not in ["medicare", "medicaid", "hipaa"]:
+        site_filter = " OR ".join([f"site:{s}" for s in TOPIC_SITE_MAP["medical"]])
         fallback_query = f"types of {last_topic} {site_filter}"
         results, _ = google_search_with_citations(fallback_query, num_results=10, broad=False)
 
@@ -194,8 +204,6 @@ def search_answer():
 
     if is_answer_incomplete(answer, latest_user_message):
         fallback_results, _ = google_search_with_citations(search_query, num_results=15, broad=True)
-        if last_topic:
-            fallback_results = [r for r in fallback_results if last_topic.lower() in (r.get("title", "") + r.get("snippet", "") + r.get("link", "")).lower()]
         answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
         return jsonify({"answer": answer, "sources": fallback_results})
 
@@ -208,3 +216,4 @@ def serve_index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
+
