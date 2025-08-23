@@ -28,23 +28,16 @@ nlp = spacy.load("en_core_sci_sm")
 # Basic abusive words list
 ABUSIVE_WORDS = ["idiot", "stupid", "dumb", "hate", "shut up", "fool", "damn", "bastard", "crap"]
 
-# Trusted site groups
-TRUSTED_MEDICAL_SITES = [
+# Trusted sites by topic
+TRUSTED_SITES = [
     "mayoclinic.org", "cdc.gov", "nih.gov", "medlineplus.gov",
     "clevelandclinic.org", "hopkinsmedicine.org"
 ]
 
-TRUSTED_INSURANCE_SITES = [
-    "medicare.gov", "medicaid.gov", "hhs.gov", "healthcare.gov"
-]
-
-# Mapping keywords to trusted sites
 TOPIC_SITE_MAP = {
-    "medicare": TRUSTED_INSURANCE_SITES,
-    "medicaid": TRUSTED_INSURANCE_SITES,
-    "hipaa": TRUSTED_INSURANCE_SITES,
-    "aca": TRUSTED_INSURANCE_SITES,
-    "obamacare": TRUSTED_INSURANCE_SITES,
+    "medicare": ["medicare.gov", "cms.gov"],
+    "medicaid": ["medicaid.gov", "cms.gov"],
+    "hipaa": ["hhs.gov", "healthit.gov"]
 }
 
 def contains_abuse(text):
@@ -66,7 +59,7 @@ def google_search_with_citations(query, num_results=5, broad=False):
         print(f"Google Search API error: {e}")
         return [], ""
     results = []
-    for item in data.get("items", []):
+    for i, item in enumerate(data.get("items", []), start=1):
         results.append({
             "title": item.get("title", ""),
             "snippet": item.get("snippet", ""),
@@ -145,30 +138,33 @@ def generate_answer_with_sources(messages, results, last_topic=None):
 
     return "I don't know. Please consult a medical professional."
 
-# Unified extractor: medical entities + insurance/government
+# unified topic extractor
 def get_last_topic(messages):
     for msg in reversed(messages):
         if msg.get("role") == "user":
             text = msg.get("content", "").lower()
 
-            # Step 1: NER for diseases/conditions
+            # Step 1: NER check for medical entities
             doc = nlp(text)
             entities = [ent.text.lower() for ent in doc.ents if ent.label_ in {"DISEASE", "DISORDER", "SYMPTOM", "CONDITION"}]
             if entities:
-                return entities[0], TRUSTED_MEDICAL_SITES
+                return entities[0], TRUSTED_SITES
 
-            # Step 2: Keyword-based insurance/government topics
+            # Step 2: check insurance/government topics
             for keyword, sites in TOPIC_SITE_MAP.items():
                 if keyword in text:
                     return keyword, sites
 
-    return None, TRUSTED_MEDICAL_SITES  # fallback
+    return None, TRUSTED_SITES
+
+def contains_medical_entity(text):
+    doc = nlp(text)
+    return any(ent.label_ in {"DISEASE", "DISORDER", "SYMPTOM", "CONDITION"} for ent in doc.ents)
 
 def rewrite_query(query, last_topic):
     if not last_topic:
         return query
-    doc = nlp(query)
-    if any(ent.label_ in {"DISEASE", "DISORDER", "SYMPTOM", "CONDITION"} for ent in doc.ents):
+    if contains_medical_entity(query):
         return query
     pronouns = ["it", "those", "these", "that", "them"]
     pattern = re.compile(r"\b(" + "|".join(pronouns) + r")\b", flags=re.IGNORECASE)
@@ -195,11 +191,16 @@ def search_answer():
     last_topic, site_list = get_last_topic(messages)
     search_query = rewrite_query(latest_user_message, last_topic)
 
-    # Always restrict search to relevant trusted sites
-    site_filter = " OR ".join([f"site:{s}" for s in site_list])
+    # ✅ FIX: restrict strictly to trusted sites
+    site_filter = " ".join([f"site:{s}" for s in site_list])
     search_query = f"{search_query} {site_filter}"
 
     results, _ = google_search_with_citations(search_query, num_results=5, broad=False)
+
+    # Special handling for 'types' queries
+    if "type" in latest_user_message.lower() and last_topic:
+        fallback_query = f"types of {last_topic} {site_filter}"
+        results, _ = google_search_with_citations(fallback_query, num_results=10, broad=False)
 
     answer = generate_answer_with_sources(messages, results, last_topic=last_topic)
 
@@ -217,5 +218,6 @@ def serve_index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
+
 
 
