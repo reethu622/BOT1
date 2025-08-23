@@ -28,18 +28,9 @@ nlp = spacy.load("en_core_sci_sm")
 # Basic abusive words list
 ABUSIVE_WORDS = ["idiot", "stupid", "dumb", "hate", "shut up", "fool", "damn", "bastard", "crap"]
 
-# Trusted medical + insurance sites
-TRUSTED_SITES = [
-    "mayoclinic.org", "cdc.gov", "nih.gov", "medlineplus.gov",
-    "clevelandclinic.org", "hopkinsmedicine.org",
-    "cms.gov", "medicare.gov", "medicaid.gov", "healthcare.gov"
-]
-
-
 def contains_abuse(text):
     text = text.lower()
     return any(word in text for word in ABUSIVE_WORDS)
-
 
 def google_search_with_citations(query, num_results=5, broad=False):
     if not GOOGLE_SEARCH_KEY:
@@ -64,17 +55,6 @@ def google_search_with_citations(query, num_results=5, broad=False):
         })
     return results, ""
 
-
-# ✅ Filter only trusted sources
-def filter_trusted_sites(results):
-    filtered = []
-    for r in results:
-        link = r.get("link", "").lower()
-        if any(site in link for site in TRUSTED_SITES):
-            filtered.append(r)
-    return filtered
-
-
 def is_answer_incomplete(answer_text, user_query):
     answer_lower = answer_text.lower()
     if any(phrase in answer_lower for phrase in ["sorry", "don't know", "cannot find", "need more information"]):
@@ -84,7 +64,6 @@ def is_answer_incomplete(answer_text, user_query):
         if not any(w in answer_lower for w in ["type", "kind", "explain"]):
             return True
     return False
-
 
 def extract_types_from_snippets(results, topic=None):
     if not topic:
@@ -102,7 +81,6 @@ def extract_types_from_snippets(results, topic=None):
                 types_texts.append(types_str)
     return "\n".join(set(types_texts))
 
-
 def generate_answer_with_sources(messages, results, last_topic=None):
     extracted_types = extract_types_from_snippets(results, topic=last_topic)
     formatted_results_text = ""
@@ -110,9 +88,9 @@ def generate_answer_with_sources(messages, results, last_topic=None):
         formatted_results_text += f"[{idx}] {item['title']}\n{item['snippet']}\nSource: {item['link']}\n\n"
 
     system_prompt = (
-        "You are a helpful and knowledgeable medical assistant chatbot. "
-        "Provide concise, clear, and medically relevant or insurance-related answers based strictly on the following web search results. "
-        "Avoid irrelevant details. If the answer is unclear, say so politely and recommend consulting a healthcare professional or the official insurance site. "
+        "You are a helpful and knowledgeable medical and insurance assistant chatbot. "
+        "Provide concise, clear, and relevant answers based strictly on the following web search results. "
+        "Avoid irrelevant details. If the answer is unclear, say so politely and recommend consulting a professional. "
         "Cite your sources with numbers like [1], [2], etc.\n\n"
     )
     if extracted_types:
@@ -146,8 +124,7 @@ def generate_answer_with_sources(messages, results, last_topic=None):
         except Exception as e:
             return f"Gemini error: {e}"
 
-    return "I don't know. Please consult a medical professional or official insurance source."
-
+    return "I don't know. Please consult a medical or insurance professional."
 
 def get_last_medical_topic(messages):
     for msg in reversed(messages):
@@ -159,11 +136,9 @@ def get_last_medical_topic(messages):
                 return entities[0].lower()
     return None
 
-
 def contains_medical_entity(text):
     doc = nlp(text)
     return any(ent.label_ in {"DISEASE", "DISORDER", "SYMPTOM", "CONDITION"} for ent in doc.ents)
-
 
 def rewrite_query(query, last_topic):
     if not last_topic:
@@ -173,7 +148,6 @@ def rewrite_query(query, last_topic):
     pronouns = ["it", "those", "these", "that", "them"]
     pattern = re.compile(r"\\b(" + "|".join(pronouns) + r")\\b", flags=re.IGNORECASE)
     return pattern.sub(last_topic, query)
-
 
 @app.route("/api/v1/search_answer", methods=["POST"])
 def search_answer():
@@ -198,37 +172,25 @@ def search_answer():
 
     results, _ = google_search_with_citations(search_query, num_results=5, broad=False)
 
-    # ✅ Only trusted sites
-    results = filter_trusted_sites(results)
-
-    # Narrow down if last topic is found
-    if last_topic:
-        results = [r for r in results if last_topic.lower() in (r.get("title", "") + r.get("snippet", "") + r.get("link", "")).lower()]
-
     # Special handling for 'types' queries
     if "type" in latest_user_message.lower() and last_topic:
         fallback_query = f"types of {last_topic}"
         results, _ = google_search_with_citations(fallback_query, num_results=10, broad=False)
-        results = filter_trusted_sites(results)
 
     answer = generate_answer_with_sources(messages, results, last_topic=last_topic)
 
     if is_answer_incomplete(answer, latest_user_message):
         fallback_results, _ = google_search_with_citations(search_query, num_results=15, broad=True)
-        fallback_results = filter_trusted_sites(fallback_results)
-        if last_topic:
-            fallback_results = [r for r in fallback_results if last_topic.lower() in (r.get("title", "") + r.get("snippet", "") + r.get("link", "")).lower()]
         answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
         return jsonify({"answer": answer, "sources": fallback_results})
 
     return jsonify({"answer": answer, "sources": results})
 
-
 @app.route("/")
 def serve_index():
     return send_from_directory(app.static_folder, "medibot.html")
 
-
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
+
