@@ -25,12 +25,15 @@ CORS(app)
 # Load scispaCy model once
 nlp = spacy.load("en_core_sci_sm")
 
-# Basic abusive words list
+# Basic abusive words list (expand as needed)
 ABUSIVE_WORDS = ["idiot", "stupid", "dumb", "hate", "shut up", "fool", "damn", "bastard", "crap"]
 
 def contains_abuse(text):
     text = text.lower()
-    return any(word in text for word in ABUSIVE_WORDS)
+    for word in ABUSIVE_WORDS:
+        if word in text:
+            return True
+    return False
 
 def google_search_with_citations(query, num_results=5, broad=False):
     """Perform Google Custom Search and return results with formatted citations."""
@@ -56,27 +59,53 @@ def google_search_with_citations(query, num_results=5, broad=False):
         return [], ""
 
     results = []
-    for item in data.get("items", []):
+    for i, item in enumerate(data.get("items", []), start=1):
         title = item.get("title", "")
         snippet = item.get("snippet", "")
         link = item.get("link", "")
         results.append({"title": title, "snippet": snippet, "link": link})
     return results, ""
 
+def is_answer_incomplete(answer_text, user_query):
+    """
+    Simple heuristic to check if answer is incomplete:
+    - If answer contains apology phrases or "I don't know"
+    - Or if key question words are missing in answer
+    """
+    answer_lower = answer_text.lower()
+    if any(phrase in answer_lower for phrase in ["sorry", "don't know", "cannot find", "need more information"]):
+        return True
+
+    question_keywords = ["type", "types", "explain", "list", "what are", "different kinds", "kinds"]
+    if any(word in user_query.lower() for word in question_keywords):
+        if "type" not in answer_lower and "kind" not in answer_lower and "explain" not in answer_lower:
+            return True
+
+    return False
+
 def extract_types_from_snippets(results, topic=None):
-    """Extract types from snippets that mention the topic."""
+    """
+    Look for patterns like 'types of', 'kinds of', 'subtypes' in snippets to extract types.
+    Returns a string summary of types found or empty string.
+    """
     types_texts = []
     pattern = re.compile(r"(types|kinds|subtypes|categories) of ([\w\s,]+)", re.IGNORECASE)
     for res in results:
-        text_block = (res.get("title", "") + " " + res.get("snippet", "")).lower()
-        if topic and topic.lower() not in text_block:
-            continue  # skip irrelevant results
         for match in pattern.finditer(res.get("snippet", "")):
             types_str = match.group(2).strip()
-            types_texts.append(types_str)
+            # Optional: filter only those that mention the topic
+            if topic:
+                if topic.lower() in types_str.lower():
+                    types_texts.append(types_str)
+                else:
+                    types_texts.append(types_str)
+            else:
+                types_texts.append(types_str)
     return "\n".join(types_texts)
 
 def generate_answer_with_sources(messages, results, last_topic=None):
+    """Generate an answer using OpenAI or Gemini based on search results and conversation."""
+
     extracted_types = extract_types_from_snippets(results, topic=last_topic)
     formatted_results_text = ""
     for idx, item in enumerate(results, start=1):
@@ -84,17 +113,24 @@ def generate_answer_with_sources(messages, results, last_topic=None):
 
     system_prompt = (
         "You are a helpful and knowledgeable medical assistant chatbot. "
-        "Provide concise, clear, and medically relevant answers strictly based on the search results. "
-        "Replace pronouns like 'it', 'those', 'these' with the last medical topic discussed. "
-        "Cite sources like [1], [2], etc. "
-        "If the answer is unclear, recommend consulting a healthcare professional.\n\n"
+        "Provide concise, clear, and medically relevant answers based strictly on the following web search results. "
+        "Avoid unnecessary details and focus on directly answering the user's question. "
+        "When the user uses pronouns like 'it', 'those', 'these', or says 'explain that', "
+        "infer that they mean the most recent medical topic or condition discussed earlier in the conversation. "
+        "Always keep track of conversational context carefully. "
+        "Answer the user's questions based on the following web search results. "
+        "If you cannot find a clear answer, politely say you don't know and recommend consulting a healthcare professional. "
+        "Cite your sources with numbers like [1], [2], etc.\n\n"
     )
     if extracted_types:
-        system_prompt += f"Types or categories extracted from search results:\n{extracted_types}\n\n"
+        system_prompt += f"Here are some types or categories extracted from the search results:\n{extracted_types}\n\n"
 
     system_prompt += f"{formatted_results_text}\n"
-    openai_messages = [{"role": "system", "content": system_prompt}] + messages
 
+    openai_messages = [{"role": "system", "content": system_prompt}]
+    openai_messages.extend(messages)
+
+    # Try OpenAI first
     if OPENAI_API_KEY:
         try:
             resp = openai.ChatCompletion.create(
@@ -102,11 +138,13 @@ def generate_answer_with_sources(messages, results, last_topic=None):
                 messages=openai_messages,
                 temperature=0.3,
             )
-            return resp.choices[0].message["content"]
+            answer = resp.choices[0].message["content"]
+            return answer
         except Exception as e:
             if "quota" not in str(e).lower():
                 return f"OpenAI error: {e}"
 
+    # Fallback to Gemini
     if GEMINI_API_KEY:
         try:
             conversation_text = system_prompt + "\nConversation:\n"
@@ -120,65 +158,97 @@ def generate_answer_with_sources(messages, results, last_topic=None):
         except Exception as e:
             return f"Gemini error: {e}"
 
+    # If no LLM keys, return fallback message
     return "I don't know. Please consult a medical professional."
 
 def get_last_medical_topic(messages):
-    """Return the most recent medical entity discussed."""
+    """
+    Extract medical entities from the latest user message first,
+    if none found, check previous messages until found.
+    Returns the most recent relevant medical entity as last topic (lowercase).
+    """
     for msg in reversed(messages):
         if msg.get("role") == "user":
             text = msg.get("content", "")
             doc = nlp(text)
-            entities = [ent.text for ent in doc.ents if ent.label_ in {"DISEASE","DISORDER","SYMPTOM","CONDITION"}]
+            # Extract entities labeled as DISEASE, DISORDER, SYMPTOM, CONDITION
+            entities = [ent.text for ent in doc.ents if ent.label_ in {"DISEASE", "DISORDER", "SYMPTOM", "CONDITION"}]
             if entities:
                 return entities[0].lower()
     return None
 
 def contains_medical_entity(text):
+    """Returns True if text contains any medical entities."""
     doc = nlp(text)
-    return any(ent.label_ in {"DISEASE","DISORDER","SYMPTOM","CONDITION"} for ent in doc.ents)
+    for ent in doc.ents:
+        if ent.label_ in {"DISEASE", "DISORDER", "SYMPTOM", "CONDITION"}:
+            return True
+    return False
 
 def rewrite_query(query, last_topic):
-    """Replace pronouns with last_topic if safe."""
-    if not last_topic or contains_medical_entity(query):
+    """
+    Replace ambiguous pronouns with last_topic if:
+    - last_topic exists
+    - query itself does NOT contain a new medical entity (topic)
+    """
+    if not last_topic:
         return query
-    pronouns = ["it","those","these","that","them"]
+
+    if contains_medical_entity(query):
+        # User asked about a new topic explicitly; don't replace pronouns
+        return query
+
+    pronouns = ["it", "those", "these", "that", "them"]
     pattern = re.compile(r"\b(" + "|".join(pronouns) + r")\b", flags=re.IGNORECASE)
-    return pattern.sub(last_topic, query)
+    new_query = pattern.sub(last_topic, query)
+    return new_query
 
 @app.route("/api/v1/search_answer", methods=["POST"])
 def search_answer():
     data = request.get_json()
     messages = data.get("messages")
     if not messages or not isinstance(messages, list):
-        return jsonify({"answer":"Please provide conversation history as a list of messages.","sources":[]})
+        return jsonify({"answer": "Please provide conversation history as a list of messages.", "sources": []})
 
-    latest_user_message = next((msg.get("content","").strip() for msg in reversed(messages) if msg.get("role")=="user"), None)
+    latest_user_message = None
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            latest_user_message = msg.get("content", "").strip()
+            break
+
     if not latest_user_message:
-        return jsonify({"answer":"No user message found in conversation.","sources":[]})
+        return jsonify({"answer": "No user message found in conversation.", "sources": []})
 
     if contains_abuse(latest_user_message):
-        return jsonify({"answer":"I am here to help with medical questions. Please be respectful.","sources":[]})
+        polite_response = (
+            "I am here to help with medical questions. "
+            "Please keep the conversation respectful. How can I assist you today?"
+        )
+        return jsonify({"answer": polite_response, "sources": []})
 
-    greetings = ["hi","hello","hey","good morning","good afternoon","good evening"]
+    greetings = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]
     if latest_user_message.lower() in greetings:
-        return jsonify({"answer":"Hi! How may I help you with your medical questions today?","sources":[]})
+        return jsonify({"answer": "Hi! How may I help you with your medical questions today?", "sources": []})
 
+    # Updated get_last_medical_topic to detect latest entity from current message or past
     last_topic = get_last_medical_topic(messages)
+
+    # Use improved rewrite_query to replace pronouns only if safe
     search_query = rewrite_query(latest_user_message, last_topic)
 
     results, _ = google_search_with_citations(search_query, num_results=5, broad=False)
-    # Strict filter: only keep results mentioning the last topic
-    if last_topic:
-        results = [r for r in results if last_topic.lower() in (r.get("title","") + r.get("snippet","")).lower()]
-
     extracted_types = extract_types_from_snippets(results, topic=last_topic)
     answer = generate_answer_with_sources(messages, results, last_topic=last_topic)
 
-    # Handle "types" queries if nothing extracted
-    if "type" in latest_user_message.lower() and not extracted_types and last_topic:
-        fallback_query = f"types of {last_topic}"
+    # Handle 'types' question fallback as before
+    if "type" in latest_user_message.lower() and not extracted_types:
+        fallback_query = f"types of {last_topic}" if last_topic else latest_user_message
         fallback_results, _ = google_search_with_citations(fallback_query, num_results=10, broad=False)
-        fallback_results = [r for r in fallback_results if last_topic.lower() in (r.get("title","")+r.get("snippet","")).lower()]
+        answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
+        return jsonify({"answer": answer, "sources": fallback_results})
+
+    if is_answer_incomplete(answer, latest_user_message):
+        fallback_results, _ = google_search_with_citations(search_query, num_results=15, broad=True)
         answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
         return jsonify({"answer": answer, "sources": fallback_results})
 
@@ -188,8 +258,8 @@ def search_answer():
 def serve_index():
     return send_from_directory(app.static_folder, "medibot.html")
 
-if __name__=="__main__":
-    port = int(os.environ.get("PORT",7000))
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
 
 
