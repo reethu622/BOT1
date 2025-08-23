@@ -28,25 +28,23 @@ nlp = spacy.load("en_core_sci_sm")
 # Basic abusive words list
 ABUSIVE_WORDS = ["idiot", "stupid", "dumb", "hate", "shut up", "fool", "damn", "bastard", "crap"]
 
+# Trusted medical sites
+TRUSTED_SITES = [
+    "mayoclinic.org", "cdc.gov", "nih.gov", "medlineplus.gov",
+    "clevelandclinic.org", "hopkinsmedicine.org"
+]
+
 def contains_abuse(text):
     text = text.lower()
     return any(word in text for word in ABUSIVE_WORDS)
 
 def google_search_with_citations(query, num_results=5, broad=False):
-    """Perform Google Custom Search using configured CX (already restricted to medical sites)."""
     if not GOOGLE_SEARCH_KEY:
         return [], ""
-
     cx = GOOGLE_SEARCH_CX_BROAD if broad else GOOGLE_SEARCH_CX_RESTRICTED
     if not cx:
         return [], ""
-
-    params = {
-        "key": GOOGLE_SEARCH_KEY,
-        "cx": cx,
-        "q": query,
-        "num": num_results
-    }
+    params = {"key": GOOGLE_SEARCH_KEY, "cx": cx, "q": query, "num": num_results}
     try:
         r = requests.get("https://www.googleapis.com/customsearch/v1", params=params)
         r.raise_for_status()
@@ -54,20 +52,19 @@ def google_search_with_citations(query, num_results=5, broad=False):
     except Exception as e:
         print(f"Google Search API error: {e}")
         return [], ""
-
     results = []
     for i, item in enumerate(data.get("items", []), start=1):
-        title = item.get("title", "")
-        snippet = item.get("snippet", "")
-        link = item.get("link", "")
-        results.append({"title": title, "snippet": snippet, "link": link})
+        results.append({
+            "title": item.get("title", ""),
+            "snippet": item.get("snippet", ""),
+            "link": item.get("link", "")
+        })
     return results, ""
 
 def is_answer_incomplete(answer_text, user_query):
     answer_lower = answer_text.lower()
     if any(phrase in answer_lower for phrase in ["sorry", "don't know", "cannot find", "need more information"]):
         return True
-
     question_keywords = ["type", "types", "explain", "list", "what are", "different kinds", "kinds"]
     if any(word in user_query.lower() for word in question_keywords):
         if not any(w in answer_lower for w in ["type", "kind", "explain"]):
@@ -75,24 +72,20 @@ def is_answer_incomplete(answer_text, user_query):
     return False
 
 def extract_types_from_snippets(results, topic=None):
-    """
-    Extract 'types of ...' phrases from snippets, but only keep those
-    relevant to the last_topic if provided.
-    """
+    if not topic:
+        return ""
     types_texts = []
     pattern = re.compile(r"(types|kinds|subtypes|categories) of ([\w\s,]+)", re.IGNORECASE)
-
     for res in results:
+        text_block = (res.get("title", "") + " " + res.get("snippet", "")).lower()
+        if topic.lower() not in text_block:
+            continue
         snippet = res.get("snippet", "")
         for match in pattern.finditer(snippet):
             types_str = match.group(2).strip()
-            if topic:
-                if topic.lower() in snippet.lower() or topic.lower() in types_str.lower():
-                    types_texts.append(types_str)
-            else:
+            if topic.lower() in (snippet.lower() + types_str.lower()):
                 types_texts.append(types_str)
-
-    return "\n".join(types_texts)
+    return "\n".join(set(types_texts))
 
 def generate_answer_with_sources(messages, results, last_topic=None):
     extracted_types = extract_types_from_snippets(results, topic=last_topic)
@@ -103,23 +96,15 @@ def generate_answer_with_sources(messages, results, last_topic=None):
     system_prompt = (
         "You are a helpful and knowledgeable medical assistant chatbot. "
         "Provide concise, clear, and medically relevant answers based strictly on the following web search results. "
-        "Avoid unnecessary details and focus on directly answering the user's question. "
-        "When the user uses pronouns like 'it', 'those', 'these', or says 'explain that', "
-        "infer that they mean the most recent medical topic or condition discussed earlier in the conversation. "
-        "Always keep track of conversational context carefully. "
-        "Answer the user's questions based on the following web search results. "
-        "If you cannot find a clear answer, politely say you don't know and recommend consulting a healthcare professional. "
+        "Avoid irrelevant details. If the answer is unclear, say so politely and recommend consulting a healthcare professional. "
         "Cite your sources with numbers like [1], [2], etc.\n\n"
     )
     if extracted_types:
-        system_prompt += f"Here are some types or categories extracted from the search results:\n{extracted_types}\n\n"
-
+        system_prompt += f"Here are some types extracted from the results:\n{extracted_types}\n\n"
     system_prompt += f"{formatted_results_text}\n"
 
-    openai_messages = [{"role": "system", "content": system_prompt}]
-    openai_messages.extend(messages)
+    openai_messages = [{"role": "system", "content": system_prompt}] + messages
 
-    # Try OpenAI first
     if OPENAI_API_KEY:
         try:
             resp = openai.ChatCompletion.create(
@@ -127,13 +112,11 @@ def generate_answer_with_sources(messages, results, last_topic=None):
                 messages=openai_messages,
                 temperature=0.3,
             )
-            answer = resp.choices[0].message["content"]
-            return answer
+            return resp.choices[0].message["content"]
         except Exception as e:
             if "quota" not in str(e).lower():
                 return f"OpenAI error: {e}"
 
-    # Fallback to Gemini
     if GEMINI_API_KEY:
         try:
             conversation_text = system_prompt + "\nConversation:\n"
@@ -157,6 +140,9 @@ def get_last_medical_topic(messages):
             entities = [ent.text for ent in doc.ents if ent.label_ in {"DISEASE", "DISORDER", "SYMPTOM", "CONDITION"}]
             if entities:
                 return entities[0].lower()
+            match = re.search(r"\b(arthritis|diabetes|cancer|asthma|hypertension|migraine|obesity)\b", text, re.I)
+            if match:
+                return match.group(0).lower()
     return None
 
 def contains_medical_entity(text):
@@ -168,9 +154,8 @@ def rewrite_query(query, last_topic):
         return query
     if contains_medical_entity(query):
         return query
-
     pronouns = ["it", "those", "these", "that", "them"]
-    pattern = re.compile(r"\b(" + "|".join(pronouns) + r")\b", flags=re.IGNORECASE)
+    pattern = re.compile(r"\\b(" + "|".join(pronouns) + r")\\b", flags=re.IGNORECASE)
     return pattern.sub(last_topic, query)
 
 @app.route("/api/v1/search_answer", methods=["POST"])
@@ -180,21 +165,12 @@ def search_answer():
     if not messages or not isinstance(messages, list):
         return jsonify({"answer": "Please provide conversation history as a list of messages.", "sources": []})
 
-    latest_user_message = None
-    for msg in reversed(messages):
-        if msg.get("role") == "user":
-            latest_user_message = msg.get("content", "").strip()
-            break
-
+    latest_user_message = next((msg.get("content", "").strip() for msg in reversed(messages) if msg.get("role") == "user"), None)
     if not latest_user_message:
         return jsonify({"answer": "No user message found in conversation.", "sources": []})
 
     if contains_abuse(latest_user_message):
-        polite_response = (
-            "I am here to help with medical questions. "
-            "Please keep the conversation respectful. How can I assist you today?"
-        )
-        return jsonify({"answer": polite_response, "sources": []})
+        return jsonify({"answer": "I am here to help with medical questions. Please keep the conversation respectful.", "sources": []})
 
     greetings = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]
     if latest_user_message.lower() in greetings:
@@ -205,57 +181,21 @@ def search_answer():
 
     results, _ = google_search_with_citations(search_query, num_results=5, broad=False)
 
-    # Strictly filter irrelevant results
     if last_topic:
-        results = [
-            r for r in results
-            if last_topic.lower() in r.get("snippet", "").lower()
-            or last_topic.lower() in r.get("title", "").lower()
-            or last_topic.lower() in r.get("link", "").lower()
-        ]
+        results = [r for r in results if last_topic.lower() in (r.get("title", "") + r.get("snippet", "") + r.get("link", "")).lower()]
 
-    # If no relevant results, fallback to trusted medical sites only
-    if not results and last_topic:
-        trusted_sites = [
-            "mayoclinic.org", "cdc.gov", "nih.gov", "niddk.nih.gov",
-            "medlineplus.gov", "clevelandclinic.org", "hopkinsmedicine.org"
-        ]
-        site_filter = " OR ".join([f"site:{s}" for s in trusted_sites])
-        fallback_query = f"{last_topic} types {site_filter}"
-        results, _ = google_search_with_citations(fallback_query, num_results=5, broad=False)
+    # Special handling for 'types' queries
+    if "type" in latest_user_message.lower() and last_topic:
+        site_filter = " OR ".join([f"site:{s}" for s in TRUSTED_SITES])
+        fallback_query = f"types of {last_topic} {site_filter}"
+        results, _ = google_search_with_citations(fallback_query, num_results=10, broad=False)
 
-    extracted_types = extract_types_from_snippets(results, topic=last_topic)
     answer = generate_answer_with_sources(messages, results, last_topic=last_topic)
-
-    # Handle 'types' question fallback
-    if "type" in latest_user_message.lower() and not extracted_types:
-        if last_topic:
-            fallback_query = f"types of {last_topic} in medicine OR healthcare"
-        else:
-            fallback_query = latest_user_message
-        fallback_results, _ = google_search_with_citations(fallback_query, num_results=10, broad=False)
-
-        # Apply strict filtering again
-        if last_topic:
-            fallback_results = [
-                r for r in fallback_results
-                if last_topic.lower() in r.get("snippet", "").lower()
-                or last_topic.lower() in r.get("title", "").lower()
-                or last_topic.lower() in r.get("link", "").lower()
-            ]
-
-        answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
-        return jsonify({"answer": answer, "sources": fallback_results})
 
     if is_answer_incomplete(answer, latest_user_message):
         fallback_results, _ = google_search_with_citations(search_query, num_results=15, broad=True)
         if last_topic:
-            fallback_results = [
-                r for r in fallback_results
-                if last_topic.lower() in r.get("snippet", "").lower()
-                or last_topic.lower() in r.get("title", "").lower()
-                or last_topic.lower() in r.get("link", "").lower()
-            ]
+            fallback_results = [r for r in fallback_results if last_topic.lower() in (r.get("title", "") + r.get("snippet", "") + r.get("link", "")).lower()]
         answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
         return jsonify({"answer": answer, "sources": fallback_results})
 
