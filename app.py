@@ -83,27 +83,17 @@ def is_answer_incomplete(answer_text, user_query):
     answer_lower = answer_text.lower()
     if any(phrase in answer_lower for phrase in ["sorry", "don't know", "cannot find", "need more information"]):
         return True
-    question_keywords = ["type", "types", "explain", "list", "what are", "different kinds", "kinds"]
+    question_keywords = ["type", "types", "kind", "kinds", "explain", "list", "what are"]
     if any(word in user_query.lower() for word in question_keywords):
         if "type" not in answer_lower and "kind" not in answer_lower and "explain" not in answer_lower:
             return True
     return False
-
-def extract_types_from_snippets(results):
-    types_texts = []
-    pattern = re.compile(r"(?:types|kinds|subtypes|forms|categories|variants|main types|main forms) (?:of|for)? ([\w\s,/-]+)", re.IGNORECASE)
-    for res in results:
-        snippet = res.get("snippet", "")
-        for match in pattern.finditer(snippet):
-            types_texts.append(match.group(1).strip())
-    return "\n".join(list(dict.fromkeys(types_texts)))
 
 def generate_answer_with_sources(messages, results, last_topic=None):
     formatted_results_text = ""
     for idx, item in enumerate(results, start=1):
         formatted_results_text += f"[{idx}] {item['title']}\n{item['snippet']}\nSource: {item['link']}\n\n"
 
-    # Updated system prompt
     system_prompt = (
         "You are a helpful medical and health assistant. Provide concise, clear answers. "
         "Use the search results provided below to answer the user's question. "
@@ -156,7 +146,7 @@ def get_last_topic(messages):
             disease_entities = [ent.text for ent in doc.ents if ent.label_ == "DISEASE"]
             if disease_entities:
                 return disease_entities[0].lower()
-            # fallback: first noun or proper noun
+            # fallback: first noun/proper noun
             for token in doc:
                 if token.pos_ in ["NOUN", "PROPN"]:
                     return token.text.lower()
@@ -189,19 +179,21 @@ def search_answer():
         if latest_user_message.lower() in GREETINGS:
             return jsonify({"answer": "Hi! How may I help you with your medical questions today?", "sources": []})
 
+        # Determine last topic only for pronouns
         last_topic = get_last_topic(messages)
         search_query = rewrite_query(latest_user_message, last_topic) if last_topic else latest_user_message
 
+        # Always perform a fresh search for the current question
         results = google_search_with_citations(search_query, num_results=10)
         answer = generate_answer_with_sources(messages, results, last_topic=last_topic)
 
-        # fallback for types/kinds questions
+        # Fallback for types/kinds questions: always search the current question fresh
         if any(word in latest_user_message.lower() for word in ["type", "types", "kind", "kinds"]):
-            fallback_query = f"types of {last_topic}" if last_topic else latest_user_message
-            fallback_results = google_search_with_citations(fallback_query, num_results=15)
-            answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
+            fallback_results = google_search_with_citations(latest_user_message, num_results=15)
+            answer = generate_answer_with_sources(messages, fallback_results)
             return jsonify({"answer": answer, "sources": fallback_results})
 
+        # Fallback if answer incomplete
         if is_answer_incomplete(answer, latest_user_message):
             fallback_results = google_search_with_citations(search_query, num_results=15)
             answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
@@ -224,4 +216,3 @@ def serve_index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
-
