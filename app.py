@@ -102,17 +102,16 @@ def generate_answer_with_sources(messages, results, last_topic=None):
         formatted_results_text += f"[{idx}] {item['title']}\n{item['snippet']}\nSource: {item['link']}\n\n"
     
     system_prompt = (
-        "You are a helpful and knowledgeable medical assistant chatbot. "
-        "Provide concise, clear, and medically relevant answers based strictly on the following web search results. "
-        "Avoid unnecessary details and focus on directly answering the user's question. "
+        "You are a helpful medical assistant. Provide concise, clear, and medically relevant answers. "
+        "Cite only one source per fact. Use the sources provided below. "
         "If the user uses pronouns like 'it', 'those', 'these', 'that', 'this disease', 'the condition', infer they mean the most recent medical topic. "
-        "Answer based on the search results and cite sources like [1], [2], etc.\n\n"
+        "Answer based strictly on the search results and cite sources like [1], [2], etc.\n\n"
     )
     if last_topic:
         system_prompt += f"Focus on the medical topic: {last_topic}\n\n"
     if extracted_types:
-        system_prompt += f"Here are some types or categories extracted from the search results:\n{extracted_types}\n\n"
-    system_prompt += f"{formatted_results_text}\n"
+        system_prompt += f"Here are types/categories extracted from search results:\n{extracted_types}\n\n"
+    system_prompt += formatted_results_text + "\n"
     
     openai_messages = [{"role": "system", "content": system_prompt}]
     openai_messages.extend(messages)
@@ -161,7 +160,6 @@ def contains_medical_entity(text):
 def rewrite_query(query, last_topic):
     if not last_topic or contains_medical_entity(query):
         return query
-    # Replace common pronouns and vague phrases with last topic
     pattern = re.compile(r"\b(it|this|that|these|those|them|the disease|the condition)\b", flags=re.IGNORECASE)
     return pattern.sub(last_topic, query)
 
@@ -195,9 +193,11 @@ def search_answer():
         search_query = rewrite_query(latest_user_message, last_topic)
         print(f"Searching Google for: {search_query}")
 
+        # Initial search
         results, _ = google_search_with_citations(search_query, num_results=10, broad=False)
         if last_topic:
             results = [r for r in results if last_topic.lower() in r["title"].lower() or last_topic.lower() in r["snippet"].lower()]
+        results = results[:6]  # limit to top 6
 
         answer = generate_answer_with_sources(messages, results, last_topic=last_topic)
 
@@ -207,6 +207,7 @@ def search_answer():
             fallback_results, _ = google_search_with_citations(fallback_query, num_results=15, broad=True)
             if last_topic:
                 fallback_results = [r for r in fallback_results if last_topic.lower() in r["title"].lower() or last_topic.lower() in r["snippet"].lower()]
+            fallback_results = fallback_results[:6]
             answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
             cited_sources = get_cited_sources(answer, fallback_results)
             return jsonify({"answer": answer, "sources": cited_sources})
@@ -215,6 +216,7 @@ def search_answer():
             fallback_results, _ = google_search_with_citations(search_query, num_results=15, broad=True)
             if last_topic:
                 fallback_results = [r for r in fallback_results if last_topic.lower() in r["title"].lower() or last_topic.lower() in r["snippet"].lower()]
+            fallback_results = fallback_results[:6]
             answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
             cited_sources = get_cited_sources(answer, fallback_results)
             return jsonify({"answer": answer, "sources": cited_sources})
@@ -243,6 +245,7 @@ def serve_index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
