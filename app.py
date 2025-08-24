@@ -165,8 +165,13 @@ def rewrite_query(query, last_topic):
     pattern = re.compile(r"\b(it|this|that|these|those|them|the disease|the condition)\b", flags=re.IGNORECASE)
     return pattern.sub(last_topic, query)
 
+def get_cited_sources(answer, results):
+    cited = re.findall(r"\[(\d+)\]", answer)
+    cited_indices = [int(i)-1 for i in cited if i.isdigit() and 0 <= int(i)-1 < len(results)]
+    return [results[i] for i in cited_indices]
+
 # ======================
-# API Routes
+# API Route
 # ======================
 @app.route("/api/v1/search_answer", methods=["POST"])
 def search_answer():
@@ -176,49 +181,54 @@ def search_answer():
         if not messages or not isinstance(messages, list):
             return jsonify({"answer": "Please provide conversation history as a list of messages.", "sources": []})
 
-        # Latest user message
         latest_user_message = next((msg.get("content", "").strip() for msg in reversed(messages) if msg.get("role") == "user"), None)
         if not latest_user_message:
             return jsonify({"answer": "No user message found in conversation.", "sources": []})
 
-        # Abuse check
         if contains_abuse(latest_user_message):
             return jsonify({"answer": "I am here to help with medical questions. Please keep the conversation respectful.", "sources": []})
 
-        # Greetings
         if latest_user_message.lower() in GREETINGS:
             return jsonify({"answer": "Hi! How may I help you with your medical questions today?", "sources": []})
 
-        # Last topic
         last_topic = get_last_medical_topic(messages)
-
-        # Rewrite query for pronouns
         search_query = rewrite_query(latest_user_message, last_topic)
-        print(f"Searching Google for: {search_query}")  # Debug
+        print(f"Searching Google for: {search_query}")
 
-        # Initial search
-        results, _ = google_search_with_citations(search_query, num_results=5, broad=False)
+        results, _ = google_search_with_citations(search_query, num_results=10, broad=False)
+        if last_topic:
+            results = [r for r in results if last_topic.lower() in r["title"].lower() or last_topic.lower() in r["snippet"].lower()]
+
         answer = generate_answer_with_sources(messages, results, last_topic=last_topic)
 
         # Fallback for types/kinds questions
         if any(word in latest_user_message.lower() for word in ["type", "types", "kind", "kinds"]):
             fallback_query = f"types of {last_topic}" if last_topic else latest_user_message
-            fallback_results, _ = google_search_with_citations(fallback_query, num_results=10, broad=True)
+            fallback_results, _ = google_search_with_citations(fallback_query, num_results=15, broad=True)
+            if last_topic:
+                fallback_results = [r for r in fallback_results if last_topic.lower() in r["title"].lower() or last_topic.lower() in r["snippet"].lower()]
             answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
-            return jsonify({"answer": answer, "sources": fallback_results})
+            cited_sources = get_cited_sources(answer, fallback_results)
+            return jsonify({"answer": answer, "sources": cited_sources})
 
-        # Fallback if answer incomplete
         if is_answer_incomplete(answer, latest_user_message):
             fallback_results, _ = google_search_with_citations(search_query, num_results=15, broad=True)
+            if last_topic:
+                fallback_results = [r for r in fallback_results if last_topic.lower() in r["title"].lower() or last_topic.lower() in r["snippet"].lower()]
             answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
-            return jsonify({"answer": answer, "sources": fallback_results})
+            cited_sources = get_cited_sources(answer, fallback_results)
+            return jsonify({"answer": answer, "sources": cited_sources})
 
-        return jsonify({"answer": answer, "sources": results})
+        cited_sources = get_cited_sources(answer, results)
+        return jsonify({"answer": answer, "sources": cited_sources})
 
     except Exception as e:
         print(f"Error in /api/v1/search_answer: {e}")
         return jsonify({"answer": "Internal server error", "sources": []}), 500
 
+# ======================
+# Serve static file
+# ======================
 @app.route("/")
 def serve_index():
     try:
@@ -233,5 +243,6 @@ def serve_index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
+
 
 
