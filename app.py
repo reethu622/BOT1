@@ -179,25 +179,33 @@ def search_answer():
         if latest_user_message.lower() in GREETINGS:
             return jsonify({"answer": "Hi! How may I help you with your medical questions today?", "sources": []})
 
-        # Determine last topic only for pronouns
+        # -------------------------
+        # Rewrite query for pronouns if necessary
+        # -------------------------
         last_topic = get_last_topic(messages)
+        latest_user_message = latest_user_message.strip()
         search_query = rewrite_query(latest_user_message, last_topic) if last_topic else latest_user_message
 
-        # Always perform a fresh search for the current question
+        # -------------------------
+        # If the question is about types/kinds, force a fresh search
+        # -------------------------
+        if any(word in latest_user_message.lower() for word in ["type", "types", "kind", "kinds"]):
+            results = google_search_with_citations(search_query, num_results=10)
+            answer = generate_answer_with_sources(messages, results)
+            return jsonify({"answer": answer, "sources": results})
+
+        # -------------------------
+        # Otherwise, normal search
+        # -------------------------
         results = google_search_with_citations(search_query, num_results=10)
         answer = generate_answer_with_sources(messages, results, last_topic=last_topic)
 
-        # Fallback for types/kinds questions: always search the current question fresh
-        if any(word in latest_user_message.lower() for word in ["type", "types", "kind", "kinds"]):
-            fallback_results = google_search_with_citations(latest_user_message, num_results=15)
-            answer = generate_answer_with_sources(messages, fallback_results)
-            return jsonify({"answer": answer, "sources": fallback_results})
-
-        # Fallback if answer incomplete
+        # -------------------------
+        # Fallback if answer seems incomplete
+        # -------------------------
         if is_answer_incomplete(answer, latest_user_message):
-            fallback_results = google_search_with_citations(search_query, num_results=15)
-            answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
-            return jsonify({"answer": answer, "sources": fallback_results})
+            results = google_search_with_citations(search_query, num_results=15)
+            answer = generate_answer_with_sources(messages, results, last_topic=last_topic)
 
         return jsonify({"answer": answer, "sources": results})
 
@@ -205,6 +213,9 @@ def search_answer():
         print(f"Error in /api/v1/search_answer: {e}")
         return jsonify({"answer": "Internal server error", "sources": []}), 500
 
+# ======================
+# Serve Frontend
+# ======================
 @app.route("/")
 def serve_index():
     try:
