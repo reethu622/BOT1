@@ -180,32 +180,34 @@ def search_answer():
             return jsonify({"answer": "Hi! How may I help you with your medical questions today?", "sources": []})
 
         # -------------------------
-        # Rewrite query for pronouns if necessary
+        # Rewrite query for pronouns
         # -------------------------
         last_topic = get_last_topic(messages)
         latest_user_message = latest_user_message.strip()
         search_query = rewrite_query(latest_user_message, last_topic) if last_topic else latest_user_message
 
         # -------------------------
-        # If the question is about types/kinds, force a fresh search
+        # If the question is about types/kinds, perform a fresh search
         # -------------------------
         if any(word in latest_user_message.lower() for word in ["type", "types", "kind", "kinds"]):
-            results = google_search_with_citations(search_query, num_results=10)
-            answer = generate_answer_with_sources(messages, results)
-            return jsonify({"answer": answer, "sources": results})
+            type_query = search_query
+            type_results = google_search_with_citations(type_query, num_results=6)
+            answer = generate_answer_with_sources(messages, type_results)
+            return jsonify({"answer": answer, "sources": type_results})
 
         # -------------------------
         # Otherwise, normal search
         # -------------------------
-        results = google_search_with_citations(search_query, num_results=10)
+        results = google_search_with_citations(search_query, num_results=6)
         answer = generate_answer_with_sources(messages, results, last_topic=last_topic)
 
         # -------------------------
         # Fallback if answer seems incomplete
         # -------------------------
         if is_answer_incomplete(answer, latest_user_message):
-            results = google_search_with_citations(search_query, num_results=15)
-            answer = generate_answer_with_sources(messages, results, last_topic=last_topic)
+            fallback_results = google_search_with_citations(search_query, num_results=10)
+            answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
+            return jsonify({"answer": answer, "sources": fallback_results})
 
         return jsonify({"answer": answer, "sources": results})
 
@@ -227,3 +229,4 @@ def serve_index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
+
