@@ -101,10 +101,13 @@ def generate_answer_with_sources(messages, results, last_topic=None):
     for idx, item in enumerate(results, start=1):
         formatted_results_text += f"[{idx}] {item['title']}\n{item['snippet']}\nSource: {item['link']}\n\n"
     
+    # ======================
+    # Updated system prompt: allows general topics
+    # ======================
     system_prompt = (
-        "You are a helpful medical assistant. Provide concise, clear, and medically relevant answers. "
-        "Cite the most relevant sources from the list below for each fact. You may cite multiple sources per fact if appropriate. "
-        "Use the sources provided below and cite them as [1], [2], etc., based on their order in the list. "
+        "You are a helpful medical and health assistant. Provide concise, clear answers. "
+        "Cite the most relevant sources from the list below for each fact. You may cite multiple sources per fact. "
+        "Use the search results provided below and cite them as [1], [2], etc., based on their order in the list. "
         "If the user uses pronouns like 'it', 'those', 'these', 'that', 'this disease', 'the condition', infer they mean the most recent medical topic. "
         "Answer strictly based on the search results.\n\n"
     )
@@ -188,7 +191,7 @@ def search_answer():
         # Determine last medical topic
         last_topic = get_last_medical_topic(messages)
 
-        # Decide query: use disease context only if query contains medical entity
+        # Use last_topic only if query contains medical entity
         if last_topic and contains_medical_entity(latest_user_message):
             search_query = rewrite_query(latest_user_message, last_topic)
         else:
@@ -239,6 +242,7 @@ def serve_index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
