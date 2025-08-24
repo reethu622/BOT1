@@ -1,6 +1,5 @@
 import os
 import re
-import subprocess
 import requests
 import openai
 import google.generativeai as genai
@@ -34,6 +33,7 @@ CORS(app)
 try:
     nlp = spacy.load("en_ner_bc5cdr_md")
 except OSError:
+    import subprocess
     subprocess.run([
         "python", "-m", "pip", "install",
         "en-ner-bc5cdr-md @ https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_ner_bc5cdr_md-0.5.4.tar.gz"
@@ -53,12 +53,12 @@ def contains_abuse(text):
     text = text.lower()
     return any(word in text for word in ABUSIVE_WORDS)
 
-def google_search_with_citations(query, num_results=5, broad=False):
+def google_search_with_citations(query, num_results=10, broad=False):
     if not GOOGLE_SEARCH_KEY:
-        return [], ""
+        return []
     cx = GOOGLE_SEARCH_CX_BROAD if broad else GOOGLE_SEARCH_CX_RESTRICTED
     if not cx:
-        return [], ""
+        return []
     try:
         r = requests.get(
             "https://www.googleapis.com/customsearch/v1",
@@ -69,12 +69,15 @@ def google_search_with_citations(query, num_results=5, broad=False):
         data = r.json()
     except Exception as e:
         print(f"Google Search API error: {e}")
-        return [], ""
-    results = [
-        {"title": item.get("title", ""), "snippet": item.get("snippet", ""), "link": item.get("link", "")}
-        for item in data.get("items", [])
-    ]
-    return results, ""
+        return []
+    results = []
+    for i, item in enumerate(data.get("items", []), start=1):
+        results.append({
+            "title": item.get("title", ""),
+            "snippet": item.get("snippet", ""),
+            "link": item.get("link", "")
+        })
+    return results[:6]  # always return top 6
 
 def is_answer_incomplete(answer_text, user_query):
     answer_lower = answer_text.lower()
@@ -96,29 +99,25 @@ def extract_types_from_snippets(results):
     return "\n".join(list(dict.fromkeys(types_texts)))
 
 def generate_answer_with_sources(messages, results, last_topic=None):
-    extracted_types = extract_types_from_snippets(results)
     formatted_results_text = ""
     for idx, item in enumerate(results, start=1):
         formatted_results_text += f"[{idx}] {item['title']}\n{item['snippet']}\nSource: {item['link']}\n\n"
-    
-    # ======================
-    # Updated system prompt: allows general queries
-    # ======================
+
+    # Updated system prompt
     system_prompt = (
         "You are a helpful medical and health assistant. Provide concise, clear answers. "
         "Use the search results provided below to answer the user's question. "
         "Cite the most relevant sources as [1], [2], etc., based on their order in the list. "
         "You may cite multiple sources per fact. "
         "If the user uses pronouns like 'it', 'those', 'these', 'that', 'this disease', 'the condition', infer they mean the most recent topic mentioned by the user. "
-        "Answer strictly based on the search results. "
+        "Answer based on the search results. "
+        "Do not mention missing sources or include notes about lacking search results. "
         "You can answer general health topics, not just diseases.\n\n"
     )
     if last_topic:
         system_prompt += f"Focus on the topic: {last_topic}\n\n"
-    if extracted_types:
-        system_prompt += f"Here are types/categories extracted from search results:\n{extracted_types}\n\n"
-    system_prompt += formatted_results_text + "\n"
-    
+    system_prompt += formatted_results_text
+
     openai_messages = [{"role": "system", "content": system_prompt}]
     openai_messages.extend(messages)
 
@@ -133,7 +132,7 @@ def generate_answer_with_sources(messages, results, last_topic=None):
         except Exception as e:
             if "quota" not in str(e).lower():
                 return f"OpenAI error: {e}"
-    
+
     if GEMINI_API_KEY:
         try:
             conversation_text = system_prompt + "\nConversation:\n"
@@ -146,37 +145,25 @@ def generate_answer_with_sources(messages, results, last_topic=None):
             return resp.text
         except Exception as e:
             return f"Gemini error: {e}"
-    
+
     return "I don't know. Please consult a medical professional."
 
-# ======================
-# Track last topic (disease or general health)
-# ======================
 def get_last_topic(messages):
-    """
-    Returns the most recent topic mentioned by the user.
-    Priority: medical entities (diseases), fallback to nouns/proper nouns.
-    """
     for msg in reversed(messages):
         if msg.get("role") == "user":
             text = msg.get("content", "")
             doc = nlp(text)
-            # Try biomedical disease entities first
             disease_entities = [ent.text for ent in doc.ents if ent.label_ == "DISEASE"]
             if disease_entities:
                 return disease_entities[0].lower()
-            # Fallback: use first noun or proper noun
+            # fallback: first noun or proper noun
             for token in doc:
                 if token.pos_ in ["NOUN", "PROPN"]:
                     return token.text.lower()
     return None
 
-def contains_medical_entity(text):
-    doc = nlp(text)
-    return any(ent.label_ == "DISEASE" for ent in doc.ents)
-
 def rewrite_query(query, last_topic):
-    if not last_topic or contains_medical_entity(query):
+    if not last_topic or any(ent.label_ == "DISEASE" for ent in nlp(query).ents):
         return query
     pattern = re.compile(r"\b(it|this|that|these|those|them|the disease|the condition)\b", flags=re.IGNORECASE)
     return pattern.sub(last_topic, query)
@@ -202,29 +189,21 @@ def search_answer():
         if latest_user_message.lower() in GREETINGS:
             return jsonify({"answer": "Hi! How may I help you with your medical questions today?", "sources": []})
 
-        # Determine last topic (disease or general)
         last_topic = get_last_topic(messages)
-
         search_query = rewrite_query(latest_user_message, last_topic) if last_topic else latest_user_message
 
-        # Google search top 10
-        results, _ = google_search_with_citations(search_query, num_results=10, broad=False)
-        results = results[:6]  # top 6 results
-
+        results = google_search_with_citations(search_query, num_results=10)
         answer = generate_answer_with_sources(messages, results, last_topic=last_topic)
 
-        # Fallback for types/kinds questions
+        # fallback for types/kinds questions
         if any(word in latest_user_message.lower() for word in ["type", "types", "kind", "kinds"]):
             fallback_query = f"types of {last_topic}" if last_topic else latest_user_message
-            fallback_results, _ = google_search_with_citations(fallback_query, num_results=15, broad=True)
-            fallback_results = fallback_results[:6]
+            fallback_results = google_search_with_citations(fallback_query, num_results=15)
             answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
             return jsonify({"answer": answer, "sources": fallback_results})
 
-        # Fallback if answer incomplete
         if is_answer_incomplete(answer, latest_user_message):
-            fallback_results, _ = google_search_with_citations(search_query, num_results=15, broad=True)
-            fallback_results = fallback_results[:6]
+            fallback_results = google_search_with_citations(search_query, num_results=15)
             answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
             return jsonify({"answer": answer, "sources": fallback_results})
 
@@ -234,9 +213,6 @@ def search_answer():
         print(f"Error in /api/v1/search_answer: {e}")
         return jsonify({"answer": "Internal server error", "sources": []}), 500
 
-# ======================
-# Serve static file
-# ======================
 @app.route("/")
 def serve_index():
     try:
@@ -245,9 +221,7 @@ def serve_index():
         print(f"Error serving static file: {e}")
         return "Index file not found", 404
 
-# ======================
-# Run App
-# ======================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
+
