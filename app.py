@@ -188,17 +188,16 @@ def search_answer():
         # Determine last medical topic
         last_topic = get_last_medical_topic(messages)
 
-        # Decide query: use NER if there’s a medical entity, else just the user query
-        if last_topic or contains_medical_entity(latest_user_message):
+        # Decide query: use disease context only if query contains medical entity
+        if last_topic and contains_medical_entity(latest_user_message):
             search_query = rewrite_query(latest_user_message, last_topic)
         else:
-            search_query = latest_user_message  # general health query
+            search_query = latest_user_message  # general query
+            last_topic = None  # ignore previous topic
 
-        # Google search top 10, filter relevance if medical topic exists
+        # Google search top 10
         results, _ = google_search_with_citations(search_query, num_results=10, broad=False)
-        if last_topic:
-            results = [r for r in results if last_topic.lower() in r["title"].lower() or last_topic.lower() in r["snippet"].lower()]
-        results = results[:6]  # top 6
+        results = results[:6]  # top 6 results
 
         answer = generate_answer_with_sources(messages, results, last_topic=last_topic)
 
@@ -206,8 +205,6 @@ def search_answer():
         if any(word in latest_user_message.lower() for word in ["type", "types", "kind", "kinds"]):
             fallback_query = f"types of {last_topic}" if last_topic else latest_user_message
             fallback_results, _ = google_search_with_citations(fallback_query, num_results=15, broad=True)
-            if last_topic:
-                fallback_results = [r for r in fallback_results if last_topic.lower() in r["title"].lower() or last_topic.lower() in r["snippet"].lower()]
             fallback_results = fallback_results[:6]
             answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
             return jsonify({"answer": answer, "sources": fallback_results})
@@ -215,13 +212,10 @@ def search_answer():
         # Fallback if answer incomplete
         if is_answer_incomplete(answer, latest_user_message):
             fallback_results, _ = google_search_with_citations(search_query, num_results=15, broad=True)
-            if last_topic:
-                fallback_results = [r for r in fallback_results if last_topic.lower() in r["title"].lower() or last_topic.lower() in r["snippet"].lower()]
             fallback_results = fallback_results[:6]
             answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
             return jsonify({"answer": answer, "sources": fallback_results})
 
-        # Return answer with all top 6 sources
         return jsonify({"answer": answer, "sources": results})
 
     except Exception as e:
@@ -245,6 +239,7 @@ def serve_index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
