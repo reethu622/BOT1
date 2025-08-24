@@ -102,17 +102,19 @@ def generate_answer_with_sources(messages, results, last_topic=None):
         formatted_results_text += f"[{idx}] {item['title']}\n{item['snippet']}\nSource: {item['link']}\n\n"
     
     # ======================
-    # Updated system prompt: allows general topics
+    # Updated system prompt: allows general queries
     # ======================
     system_prompt = (
         "You are a helpful medical and health assistant. Provide concise, clear answers. "
-        "Cite the most relevant sources from the list below for each fact. You may cite multiple sources per fact. "
-        "Use the search results provided below and cite them as [1], [2], etc., based on their order in the list. "
-        "If the user uses pronouns like 'it', 'those', 'these', 'that', 'this disease', 'the condition', infer they mean the most recent medical topic. "
-        "Answer strictly based on the search results.\n\n"
+        "Use the search results provided below to answer the user's question. "
+        "Cite the most relevant sources as [1], [2], etc., based on their order in the list. "
+        "You may cite multiple sources per fact. "
+        "If the user uses pronouns like 'it', 'those', 'these', 'that', 'this disease', 'the condition', infer they mean the most recent topic mentioned by the user. "
+        "Answer strictly based on the search results. "
+        "You can answer general health topics, not just diseases.\n\n"
     )
     if last_topic:
-        system_prompt += f"Focus on the medical topic: {last_topic}\n\n"
+        system_prompt += f"Focus on the topic: {last_topic}\n\n"
     if extracted_types:
         system_prompt += f"Here are types/categories extracted from search results:\n{extracted_types}\n\n"
     system_prompt += formatted_results_text + "\n"
@@ -147,14 +149,26 @@ def generate_answer_with_sources(messages, results, last_topic=None):
     
     return "I don't know. Please consult a medical professional."
 
-def get_last_medical_topic(messages):
+# ======================
+# Track last topic (disease or general health)
+# ======================
+def get_last_topic(messages):
+    """
+    Returns the most recent topic mentioned by the user.
+    Priority: medical entities (diseases), fallback to nouns/proper nouns.
+    """
     for msg in reversed(messages):
         if msg.get("role") == "user":
             text = msg.get("content", "")
             doc = nlp(text)
+            # Try biomedical disease entities first
             disease_entities = [ent.text for ent in doc.ents if ent.label_ == "DISEASE"]
             if disease_entities:
                 return disease_entities[0].lower()
+            # Fallback: use first noun or proper noun
+            for token in doc:
+                if token.pos_ in ["NOUN", "PROPN"]:
+                    return token.text.lower()
     return None
 
 def contains_medical_entity(text):
@@ -188,15 +202,10 @@ def search_answer():
         if latest_user_message.lower() in GREETINGS:
             return jsonify({"answer": "Hi! How may I help you with your medical questions today?", "sources": []})
 
-        # Determine last medical topic
-        last_topic = get_last_medical_topic(messages)
+        # Determine last topic (disease or general)
+        last_topic = get_last_topic(messages)
 
-        # Use last_topic only if query contains medical entity
-        if last_topic and contains_medical_entity(latest_user_message):
-            search_query = rewrite_query(latest_user_message, last_topic)
-        else:
-            search_query = latest_user_message  # general query
-            last_topic = None  # ignore previous topic
+        search_query = rewrite_query(latest_user_message, last_topic) if last_topic else latest_user_message
 
         # Google search top 10
         results, _ = google_search_with_citations(search_query, num_results=10, broad=False)
@@ -242,11 +251,3 @@ def serve_index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
-
-
-
-
-
-
-
-
