@@ -103,9 +103,10 @@ def generate_answer_with_sources(messages, results, last_topic=None):
     
     system_prompt = (
         "You are a helpful medical assistant. Provide concise, clear, and medically relevant answers. "
-        "Cite only one source per fact. Use the sources provided below. "
+        "Cite the most relevant sources from the list below for each fact. You may cite multiple sources per fact if appropriate. "
+        "Use the sources provided below and cite them as [1], [2], etc., based on their order in the list. "
         "If the user uses pronouns like 'it', 'those', 'these', 'that', 'this disease', 'the condition', infer they mean the most recent medical topic. "
-        "Answer based strictly on the search results and cite sources like [1], [2], etc.\n\n"
+        "Answer strictly based on the search results.\n\n"
     )
     if last_topic:
         system_prompt += f"Focus on the medical topic: {last_topic}\n\n"
@@ -163,11 +164,6 @@ def rewrite_query(query, last_topic):
     pattern = re.compile(r"\b(it|this|that|these|those|them|the disease|the condition)\b", flags=re.IGNORECASE)
     return pattern.sub(last_topic, query)
 
-def get_cited_sources(answer, results):
-    cited = re.findall(r"\[(\d+)\]", answer)
-    cited_indices = [int(i)-1 for i in cited if i.isdigit() and 0 <= int(i)-1 < len(results)]
-    return [results[i] for i in cited_indices]
-
 # ======================
 # API Route
 # ======================
@@ -197,7 +193,7 @@ def search_answer():
         results, _ = google_search_with_citations(search_query, num_results=10, broad=False)
         if last_topic:
             results = [r for r in results if last_topic.lower() in r["title"].lower() or last_topic.lower() in r["snippet"].lower()]
-        results = results[:6]  # limit to top 6
+        results = results[:6]  # keep only top 6 results
 
         answer = generate_answer_with_sources(messages, results, last_topic=last_topic)
 
@@ -209,8 +205,8 @@ def search_answer():
                 fallback_results = [r for r in fallback_results if last_topic.lower() in r["title"].lower() or last_topic.lower() in r["snippet"].lower()]
             fallback_results = fallback_results[:6]
             answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
-            cited_sources = get_cited_sources(answer, fallback_results)
-            return jsonify({"answer": answer, "sources": cited_sources})
+            # Return all top 6 results
+            return jsonify({"answer": answer, "sources": fallback_results})
 
         if is_answer_incomplete(answer, latest_user_message):
             fallback_results, _ = google_search_with_citations(search_query, num_results=15, broad=True)
@@ -218,11 +214,10 @@ def search_answer():
                 fallback_results = [r for r in fallback_results if last_topic.lower() in r["title"].lower() or last_topic.lower() in r["snippet"].lower()]
             fallback_results = fallback_results[:6]
             answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
-            cited_sources = get_cited_sources(answer, fallback_results)
-            return jsonify({"answer": answer, "sources": cited_sources})
+            return jsonify({"answer": answer, "sources": fallback_results})
 
-        cited_sources = get_cited_sources(answer, results)
-        return jsonify({"answer": answer, "sources": cited_sources})
+        # Return all top 6 results
+        return jsonify({"answer": answer, "sources": results})
 
     except Exception as e:
         print(f"Error in /api/v1/search_answer: {e}")
@@ -245,6 +240,7 @@ def serve_index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
