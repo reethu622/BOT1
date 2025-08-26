@@ -6,9 +6,9 @@ import google.generativeai as genai
 import spacy
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-from profanity_check import predict  # local abusive detection
+from better_profanity import profanity  # Lightweight automatic profanity detection
 
-# Load API keys from environment variables
+# ------------------ API Keys ------------------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GOOGLE_SEARCH_KEY = os.getenv("GOOGLE_SEARCH_KEY", "")
@@ -20,31 +20,29 @@ if OPENAI_API_KEY:
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
+# ------------------ Flask ------------------
 app = Flask(__name__, static_folder="static")
 CORS(app)
 
-# Load scispaCy model once
+# ------------------ NLP ------------------
 nlp = spacy.load("en_core_sci_sm")
 
-def contains_abuse(text):
-    """Return True if text is abusive/toxic using profanity-check."""
-    return bool(predict([text])[0])
+# ------------------ Profanity ------------------
+profanity.load_censor_words()
 
+def contains_abuse(text):
+    """Return True if text contains abusive/profane words."""
+    return profanity.contains_profanity(text)
+
+# ------------------ Google Search ------------------
 def google_search_with_citations(query, num_results=5, broad=False):
     """Perform Google Custom Search and return results with formatted citations."""
     if not GOOGLE_SEARCH_KEY:
-        return [], ""  
-
+        return [], ""
     cx = GOOGLE_SEARCH_CX_BROAD if broad else GOOGLE_SEARCH_CX_RESTRICTED
     if not cx:
         return [], ""
-
-    params = {
-        "key": GOOGLE_SEARCH_KEY,
-        "cx": cx,
-        "q": query,
-        "num": num_results
-    }
+    params = {"key": GOOGLE_SEARCH_KEY, "cx": cx, "q": query, "num": num_results}
     try:
         r = requests.get("https://www.googleapis.com/customsearch/v1", params=params)
         r.raise_for_status()
@@ -52,16 +50,14 @@ def google_search_with_citations(query, num_results=5, broad=False):
     except Exception as e:
         print(f"Google Search API error: {e}")
         return [], ""
-
     results = []
     for i, item in enumerate(data.get("items", []), start=1):
-        title = item.get("title", "")
-        snippet = item.get("snippet", "")
-        link = item.get("link", "")
-        results.append({"title": title, "snippet": snippet, "link": link})
+        results.append({"title": item.get("title", ""), "snippet": item.get("snippet", ""), "link": item.get("link", "")})
     return results, ""
 
+# ------------------ Utility Functions ------------------
 def is_answer_incomplete(answer_text, user_query):
+    """Check if answer seems incomplete or lacks types when requested."""
     answer_lower = answer_text.lower()
     if any(phrase in answer_lower for phrase in ["sorry", "don't know", "cannot find", "need more information"]):
         return True
@@ -72,12 +68,9 @@ def is_answer_incomplete(answer_text, user_query):
     return False
 
 def extract_types_from_snippets(results, topic=None):
-    """Extract patterns like 'types of', 'kinds of', etc. from snippets."""
+    """Extract patterns like 'types of', 'kinds of', etc., from snippets."""
     types_texts = []
-    pattern = re.compile(
-        r"\b(type|types|kind|kinds|subtype|subtypes|category|categories) of ([\w\s,]+?)(?:[.;]|$)",
-        re.IGNORECASE
-    )
+    pattern = re.compile(r"\b(type|types|kind|kinds|subtype|subtypes|category|categories) of ([\w\s,]+?)(?:[.;]|$)", re.IGNORECASE)
     for res in results:
         snippet = res.get("snippet", "")
         for match in pattern.finditer(snippet):
@@ -87,11 +80,11 @@ def extract_types_from_snippets(results, topic=None):
     return "\n".join(types_texts)
 
 def generate_answer_with_sources(messages, results, last_topic=None):
+    """Generate an answer using OpenAI or Gemini based on search results and conversation."""
     extracted_types = extract_types_from_snippets(results, topic=last_topic)
     formatted_results_text = ""
     for idx, item in enumerate(results, start=1):
         formatted_results_text += f"[{idx}] {item['title']}\n{item['snippet']}\nSource: {item['link']}\n\n"
-
     system_prompt = (
         "You are a helpful and knowledgeable medical assistant chatbot. "
         "Provide concise, clear, and medically relevant answers based strictly on the following web search results. "
@@ -105,11 +98,12 @@ def generate_answer_with_sources(messages, results, last_topic=None):
     )
     if extracted_types:
         system_prompt += f"Here are some types or categories extracted from the search results:\n{extracted_types}\n\n"
-
     system_prompt += f"{formatted_results_text}\n"
+
     openai_messages = [{"role": "system", "content": system_prompt}]
     openai_messages.extend(messages)
 
+    # Try OpenAI
     if OPENAI_API_KEY:
         try:
             resp = openai.ChatCompletion.create(
@@ -117,12 +111,12 @@ def generate_answer_with_sources(messages, results, last_topic=None):
                 messages=openai_messages,
                 temperature=0.3,
             )
-            answer = resp.choices[0].message["content"]
-            return answer
+            return resp.choices[0].message["content"]
         except Exception as e:
             if "quota" not in str(e).lower():
                 return f"OpenAI error: {e}"
 
+    # Fallback to Gemini
     if GEMINI_API_KEY:
         try:
             conversation_text = system_prompt + "\nConversation:\n"
@@ -139,6 +133,7 @@ def generate_answer_with_sources(messages, results, last_topic=None):
     return "I don't know. Please consult a medical professional."
 
 def get_last_medical_topic(messages):
+    """Extract latest medical entity from conversation."""
     for msg in reversed(messages):
         if msg.get("role") == "user":
             text = msg.get("content", "")
@@ -156,15 +151,16 @@ def contains_medical_entity(text):
     return False
 
 def rewrite_query(query, last_topic):
+    """Replace pronouns with last_topic if safe."""
     if not last_topic:
         return query
     if contains_medical_entity(query):
         return query
     pronouns = ["it", "those", "these", "that", "them"]
     pattern = re.compile(r"\b(" + "|".join(pronouns) + r")\b", flags=re.IGNORECASE)
-    new_query = pattern.sub(last_topic, query)
-    return new_query
+    return pattern.sub(last_topic, query)
 
+# ------------------ API Endpoint ------------------
 @app.route("/api/v1/search_answer", methods=["POST"])
 def search_answer():
     data = request.get_json()
@@ -172,23 +168,18 @@ def search_answer():
     if not messages or not isinstance(messages, list):
         return jsonify({"answer": "Please provide conversation history as a list of messages.", "sources": []})
 
-    latest_user_message = None
-    for msg in reversed(messages):
-        if msg.get("role") == "user":
-            latest_user_message = msg.get("content", "").strip()
-            break
+    latest_user_message = next((msg.get("content", "").strip() for msg in reversed(messages) if msg.get("role") == "user"), None)
     if not latest_user_message:
         return jsonify({"answer": "No user message found in conversation.", "sources": []})
 
     if contains_abuse(latest_user_message):
-        polite_response = (
-            "I am here to help with medical questions. "
-            "Please keep the conversation respectful. How can I assist you today?"
-        )
-        return jsonify({"answer": polite_response, "sources": []})
+        return jsonify({
+            "answer": "I am here to help with medical questions. Please keep the conversation respectful. How can I assist you today?",
+            "sources": []
+        })
 
-    greetings_patterns = [r"\bhi\b", r"\bhello\b", r"\bhey\b", r"\bgood morning\b", r"\bgood afternoon\b", r"\bgood evening\b"]
-    if any(re.search(p, latest_user_message, re.IGNORECASE) for p in greetings_patterns):
+    greetings = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]
+    if any(latest_user_message.lower().startswith(greet) for greet in greetings):
         return jsonify({"answer": "Hi! How may I help you with your medical questions today?", "sources": []})
 
     last_topic = get_last_medical_topic(messages)
@@ -198,14 +189,17 @@ def search_answer():
     extracted_types = extract_types_from_snippets(results, topic=last_topic)
     answer = generate_answer_with_sources(messages, results, last_topic=last_topic)
 
-    # If question asks about types and types are missing, do broad search
+    # Fallback if user asks about types and they aren't in initial results
     if "type" in latest_user_message.lower() and not extracted_types:
         fallback_query = f"types of {last_topic}" if last_topic else latest_user_message
-        fallback_results, _ = google_search_with_citations(fallback_query, num_results=10, broad=True)
-        answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
-        return jsonify({"answer": answer, "sources": fallback_results})
+        # Search both restricted and broad
+        fallback_results, _ = google_search_with_citations(fallback_query, num_results=10, broad=False)
+        fallback_results_broad, _ = google_search_with_citations(fallback_query, num_results=10, broad=True)
+        combined_results = fallback_results + fallback_results_broad
+        answer = generate_answer_with_sources(messages, combined_results, last_topic=last_topic)
+        return jsonify({"answer": answer, "sources": combined_results})
 
-    # If answer is incomplete, try broad search fallback
+    # Fallback if answer seems incomplete
     if is_answer_incomplete(answer, latest_user_message):
         fallback_results, _ = google_search_with_citations(search_query, num_results=15, broad=True)
         answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
@@ -213,12 +207,15 @@ def search_answer():
 
     return jsonify({"answer": answer, "sources": results})
 
+# ------------------ Serve Frontend ------------------
 @app.route("/")
 def serve_index():
     return send_from_directory(app.static_folder, "medibot.html")
 
+# ------------------ Run ------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
+
 
 
