@@ -6,6 +6,7 @@ import google.generativeai as genai
 import spacy
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
+from profanity_check import predict  # local abusive detection
 
 # Load API keys from environment variables
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -25,20 +26,14 @@ CORS(app)
 # Load scispaCy model once
 nlp = spacy.load("en_core_sci_sm")
 
-# Basic abusive words list (expand as needed)
-ABUSIVE_WORDS = ["idiot", "stupid", "dumb", "hate", "shut up", "fool", "damn", "bastard", "crap"]
-
 def contains_abuse(text):
-    text = text.lower()
-    for word in ABUSIVE_WORDS:
-        if word in text:
-            return True
-    return False
+    """Return True if text is abusive/toxic using profanity-check."""
+    return bool(predict([text])[0])
 
 def google_search_with_citations(query, num_results=5, broad=False):
     """Perform Google Custom Search and return results with formatted citations."""
     if not GOOGLE_SEARCH_KEY:
-        return [], ""  # Skip search if keys missing
+        return [], ""  
 
     cx = GOOGLE_SEARCH_CX_BROAD if broad else GOOGLE_SEARCH_CX_RESTRICTED
     if not cx:
@@ -67,45 +62,31 @@ def google_search_with_citations(query, num_results=5, broad=False):
     return results, ""
 
 def is_answer_incomplete(answer_text, user_query):
-    """
-    Simple heuristic to check if answer is incomplete:
-    - If answer contains apology phrases or "I don't know"
-    - Or if key question words are missing in answer
-    """
     answer_lower = answer_text.lower()
     if any(phrase in answer_lower for phrase in ["sorry", "don't know", "cannot find", "need more information"]):
         return True
-
     question_keywords = ["type", "types", "explain", "list", "what are", "different kinds", "kinds"]
     if any(word in user_query.lower() for word in question_keywords):
         if "type" not in answer_lower and "kind" not in answer_lower and "explain" not in answer_lower:
             return True
-
     return False
 
 def extract_types_from_snippets(results, topic=None):
-    """
-    Look for patterns like 'types of', 'kinds of', 'subtypes' in snippets to extract types.
-    Returns a string summary of types found or empty string.
-    """
+    """Extract patterns like 'types of', 'kinds of', etc. from snippets."""
     types_texts = []
-    pattern = re.compile(r"(types|kinds|subtypes|categories) of ([\w\s,]+)", re.IGNORECASE)
+    pattern = re.compile(
+        r"\b(type|types|kind|kinds|subtype|subtypes|category|categories) of ([\w\s,]+?)(?:[.;]|$)",
+        re.IGNORECASE
+    )
     for res in results:
-        for match in pattern.finditer(res.get("snippet", "")):
+        snippet = res.get("snippet", "")
+        for match in pattern.finditer(snippet):
             types_str = match.group(2).strip()
-            # Optional: filter only those that mention the topic
-            if topic:
-                if topic.lower() in types_str.lower():
-                    types_texts.append(types_str)
-                else:
-                    types_texts.append(types_str)
-            else:
+            if not topic or topic.lower() in types_str.lower():
                 types_texts.append(types_str)
     return "\n".join(types_texts)
 
 def generate_answer_with_sources(messages, results, last_topic=None):
-    """Generate an answer using OpenAI or Gemini based on search results and conversation."""
-
     extracted_types = extract_types_from_snippets(results, topic=last_topic)
     formatted_results_text = ""
     for idx, item in enumerate(results, start=1):
@@ -126,11 +107,9 @@ def generate_answer_with_sources(messages, results, last_topic=None):
         system_prompt += f"Here are some types or categories extracted from the search results:\n{extracted_types}\n\n"
 
     system_prompt += f"{formatted_results_text}\n"
-
     openai_messages = [{"role": "system", "content": system_prompt}]
     openai_messages.extend(messages)
 
-    # Try OpenAI first
     if OPENAI_API_KEY:
         try:
             resp = openai.ChatCompletion.create(
@@ -144,7 +123,6 @@ def generate_answer_with_sources(messages, results, last_topic=None):
             if "quota" not in str(e).lower():
                 return f"OpenAI error: {e}"
 
-    # Fallback to Gemini
     if GEMINI_API_KEY:
         try:
             conversation_text = system_prompt + "\nConversation:\n"
@@ -158,27 +136,19 @@ def generate_answer_with_sources(messages, results, last_topic=None):
         except Exception as e:
             return f"Gemini error: {e}"
 
-    # If no LLM keys, return fallback message
     return "I don't know. Please consult a medical professional."
 
 def get_last_medical_topic(messages):
-    """
-    Extract medical entities from the latest user message first,
-    if none found, check previous messages until found.
-    Returns the most recent relevant medical entity as last topic (lowercase).
-    """
     for msg in reversed(messages):
         if msg.get("role") == "user":
             text = msg.get("content", "")
             doc = nlp(text)
-            # Extract entities labeled as DISEASE, DISORDER, SYMPTOM, CONDITION
             entities = [ent.text for ent in doc.ents if ent.label_ in {"DISEASE", "DISORDER", "SYMPTOM", "CONDITION"}]
             if entities:
                 return entities[0].lower()
     return None
 
 def contains_medical_entity(text):
-    """Returns True if text contains any medical entities."""
     doc = nlp(text)
     for ent in doc.ents:
         if ent.label_ in {"DISEASE", "DISORDER", "SYMPTOM", "CONDITION"}:
@@ -186,18 +156,10 @@ def contains_medical_entity(text):
     return False
 
 def rewrite_query(query, last_topic):
-    """
-    Replace ambiguous pronouns with last_topic if:
-    - last_topic exists
-    - query itself does NOT contain a new medical entity (topic)
-    """
     if not last_topic:
         return query
-
     if contains_medical_entity(query):
-        # User asked about a new topic explicitly; don't replace pronouns
         return query
-
     pronouns = ["it", "those", "these", "that", "them"]
     pattern = re.compile(r"\b(" + "|".join(pronouns) + r")\b", flags=re.IGNORECASE)
     new_query = pattern.sub(last_topic, query)
@@ -215,7 +177,6 @@ def search_answer():
         if msg.get("role") == "user":
             latest_user_message = msg.get("content", "").strip()
             break
-
     if not latest_user_message:
         return jsonify({"answer": "No user message found in conversation.", "sources": []})
 
@@ -226,27 +187,25 @@ def search_answer():
         )
         return jsonify({"answer": polite_response, "sources": []})
 
-    greetings = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]
-    if latest_user_message.lower() in greetings:
+    greetings_patterns = [r"\bhi\b", r"\bhello\b", r"\bhey\b", r"\bgood morning\b", r"\bgood afternoon\b", r"\bgood evening\b"]
+    if any(re.search(p, latest_user_message, re.IGNORECASE) for p in greetings_patterns):
         return jsonify({"answer": "Hi! How may I help you with your medical questions today?", "sources": []})
 
-    # Updated get_last_medical_topic to detect latest entity from current message or past
     last_topic = get_last_medical_topic(messages)
-
-    # Use improved rewrite_query to replace pronouns only if safe
     search_query = rewrite_query(latest_user_message, last_topic)
 
     results, _ = google_search_with_citations(search_query, num_results=5, broad=False)
     extracted_types = extract_types_from_snippets(results, topic=last_topic)
     answer = generate_answer_with_sources(messages, results, last_topic=last_topic)
 
-    # Handle 'types' question fallback as before
+    # If question asks about types and types are missing, do broad search
     if "type" in latest_user_message.lower() and not extracted_types:
         fallback_query = f"types of {last_topic}" if last_topic else latest_user_message
-        fallback_results, _ = google_search_with_citations(fallback_query, num_results=10, broad=False)
+        fallback_results, _ = google_search_with_citations(fallback_query, num_results=10, broad=True)
         answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
         return jsonify({"answer": answer, "sources": fallback_results})
 
+    # If answer is incomplete, try broad search fallback
     if is_answer_incomplete(answer, latest_user_message):
         fallback_results, _ = google_search_with_citations(search_query, num_results=15, broad=True)
         answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
@@ -261,4 +220,5 @@ def serve_index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
+
 
