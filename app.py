@@ -50,7 +50,11 @@ def google_search_with_citations(query, num_results=5, broad=False):
         return [], ""
     results = []
     for i, item in enumerate(data.get("items", []), start=1):
-        results.append({"title": item.get("title", ""), "snippet": item.get("snippet", ""), "link": item.get("link", "")})
+        results.append({
+            "title": item.get("title", ""),
+            "snippet": item.get("snippet", ""),
+            "link": item.get("link", "")
+        })
     return results, ""
 
 # ------------------ Utility Functions ------------------
@@ -106,10 +110,10 @@ def generate_answer_with_sources(messages, results, last_topic=None):
                 messages=openai_messages,
                 temperature=0.3,
             )
-            return resp.choices[0].message["content"]
+            return resp.choices[0].message["content"], "openai"
         except Exception as e:
             if "quota" not in str(e).lower():
-                return f"OpenAI error: {e}"
+                return f"OpenAI error: {e}", "openai"
 
     if GEMINI_API_KEY:
         try:
@@ -120,11 +124,11 @@ def generate_answer_with_sources(messages, results, last_topic=None):
             conversation_text += "Assistant:"
             model = genai.GenerativeModel("gemini-1.5-flash")
             resp = model.generate_content(conversation_text)
-            return resp.text
+            return resp.text, "gemini"
         except Exception as e:
-            return f"Gemini error: {e}"
+            return f"Gemini error: {e}", "gemini"
 
-    return "I don't know. Please consult a medical professional."
+    return "I don't know. Please consult a medical professional.", "none"
 
 def get_last_medical_topic(messages):
     for msg in reversed(messages):
@@ -158,45 +162,82 @@ def search_answer():
     data = request.get_json()
     messages = data.get("messages")
     if not messages or not isinstance(messages, list):
-        return jsonify({"answer": "Please provide conversation history as a list of messages.", "sources": [], "restricted": False, "fallback": False})
+        return jsonify({
+            "answer": "Please provide conversation history as a list of messages.",
+            "sources": [],
+            "restricted": False,
+            "fallback": False,
+            "model_used": "none"
+        })
 
     latest_user_message = next((msg.get("content", "").strip() for msg in reversed(messages) if msg.get("role") == "user"), None)
     if not latest_user_message:
-        return jsonify({"answer": "No user message found in conversation.", "sources": [], "restricted": False, "fallback": False})
+        return jsonify({
+            "answer": "No user message found in conversation.",
+            "sources": [],
+            "restricted": False,
+            "fallback": False,
+            "model_used": "none"
+        })
 
     if contains_abuse(latest_user_message):
         return jsonify({
             "answer": "I am here to help with medical questions. Please keep the conversation respectful. How can I assist you today?",
             "sources": [],
             "restricted": True,
-            "fallback": False
+            "fallback": False,
+            "model_used": "none"
         })
 
     greetings = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]
     if any(latest_user_message.lower().startswith(greet) for greet in greetings):
-        return jsonify({"answer": "Hi! How may I help you with your medical questions today?", "sources": [], "restricted": True, "fallback": False})
+        return jsonify({
+            "answer": "Hi! How may I help you with your medical questions today?",
+            "sources": [],
+            "restricted": True,
+            "fallback": False,
+            "model_used": "none"
+        })
 
     last_topic = get_last_medical_topic(messages)
     search_query = rewrite_query(latest_user_message, last_topic)
 
     results, _ = google_search_with_citations(search_query, num_results=5, broad=False)
     extracted_types = extract_types_from_snippets(results, topic=last_topic)
-    answer = generate_answer_with_sources(messages, results, last_topic=last_topic)
+    answer, model_used = generate_answer_with_sources(messages, results, last_topic=last_topic)
 
     if "type" in latest_user_message.lower() and not extracted_types:
         fallback_query = f"types of {last_topic}" if last_topic else latest_user_message
         fallback_results, _ = google_search_with_citations(fallback_query, num_results=10, broad=False)
         fallback_results_broad, _ = google_search_with_citations(fallback_query, num_results=10, broad=True)
         combined_results = fallback_results + fallback_results_broad
-        answer = generate_answer_with_sources(messages, combined_results, last_topic=last_topic)
-        return jsonify({"answer": answer, "sources": combined_results, "restricted": False, "fallback": True})
+        answer, model_used = generate_answer_with_sources(messages, combined_results, last_topic=last_topic)
+        return jsonify({
+            "answer": answer,
+            "sources": combined_results,
+            "restricted": False,
+            "fallback": True,
+            "model_used": model_used
+        })
 
     if is_answer_incomplete(answer, latest_user_message):
         fallback_results, _ = google_search_with_citations(search_query, num_results=15, broad=True)
-        answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
-        return jsonify({"answer": answer, "sources": fallback_results, "restricted": False, "fallback": True})
+        answer, model_used = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
+        return jsonify({
+            "answer": answer,
+            "sources": fallback_results,
+            "restricted": False,
+            "fallback": True,
+            "model_used": model_used
+        })
 
-    return jsonify({"answer": answer, "sources": results, "restricted": True, "fallback": False})
+    return jsonify({
+        "answer": answer,
+        "sources": results,
+        "restricted": True,
+        "fallback": False,
+        "model_used": model_used
+    })
 
 # ------------------ Serve Frontend ------------------
 @app.route("/")
@@ -207,6 +248,7 @@ def serve_index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
