@@ -31,12 +31,10 @@ nlp = spacy.load("en_core_sci_sm")
 profanity.load_censor_words()
 
 def contains_abuse(text):
-    """Return True if text contains abusive/profane words."""
     return profanity.contains_profanity(text)
 
 # ------------------ Google Search ------------------
 def google_search_with_citations(query, num_results=5, broad=False):
-    """Perform Google Custom Search and return results with formatted citations."""
     if not GOOGLE_SEARCH_KEY:
         return [], ""
     cx = GOOGLE_SEARCH_CX_BROAD if broad else GOOGLE_SEARCH_CX_RESTRICTED
@@ -57,7 +55,6 @@ def google_search_with_citations(query, num_results=5, broad=False):
 
 # ------------------ Utility Functions ------------------
 def is_answer_incomplete(answer_text, user_query):
-    """Check if answer seems incomplete or lacks types when requested."""
     answer_lower = answer_text.lower()
     if any(phrase in answer_lower for phrase in ["sorry", "don't know", "cannot find", "need more information"]):
         return True
@@ -68,7 +65,6 @@ def is_answer_incomplete(answer_text, user_query):
     return False
 
 def extract_types_from_snippets(results, topic=None):
-    """Extract patterns like 'types of', 'kinds of', etc., from snippets."""
     types_texts = []
     pattern = re.compile(r"\b(type|types|kind|kinds|subtype|subtypes|category|categories) of ([\w\s,]+?)(?:[.;]|$)", re.IGNORECASE)
     for res in results:
@@ -80,11 +76,11 @@ def extract_types_from_snippets(results, topic=None):
     return "\n".join(types_texts)
 
 def generate_answer_with_sources(messages, results, last_topic=None):
-    """Generate an answer using OpenAI or Gemini based on search results and conversation."""
     extracted_types = extract_types_from_snippets(results, topic=last_topic)
     formatted_results_text = ""
     for idx, item in enumerate(results, start=1):
         formatted_results_text += f"[{idx}] {item['title']}\n{item['snippet']}\nSource: {item['link']}\n\n"
+
     system_prompt = (
         "You are a helpful and knowledgeable medical assistant chatbot. "
         "Provide concise, clear, and medically relevant answers based strictly on the following web search results. "
@@ -103,7 +99,6 @@ def generate_answer_with_sources(messages, results, last_topic=None):
     openai_messages = [{"role": "system", "content": system_prompt}]
     openai_messages.extend(messages)
 
-    # Try OpenAI
     if OPENAI_API_KEY:
         try:
             resp = openai.ChatCompletion.create(
@@ -116,7 +111,6 @@ def generate_answer_with_sources(messages, results, last_topic=None):
             if "quota" not in str(e).lower():
                 return f"OpenAI error: {e}"
 
-    # Fallback to Gemini
     if GEMINI_API_KEY:
         try:
             conversation_text = system_prompt + "\nConversation:\n"
@@ -133,7 +127,6 @@ def generate_answer_with_sources(messages, results, last_topic=None):
     return "I don't know. Please consult a medical professional."
 
 def get_last_medical_topic(messages):
-    """Extract latest medical entity from conversation."""
     for msg in reversed(messages):
         if msg.get("role") == "user":
             text = msg.get("content", "")
@@ -151,7 +144,6 @@ def contains_medical_entity(text):
     return False
 
 def rewrite_query(query, last_topic):
-    """Replace pronouns with last_topic if safe."""
     if not last_topic:
         return query
     if contains_medical_entity(query):
@@ -166,21 +158,23 @@ def search_answer():
     data = request.get_json()
     messages = data.get("messages")
     if not messages or not isinstance(messages, list):
-        return jsonify({"answer": "Please provide conversation history as a list of messages.", "sources": []})
+        return jsonify({"answer": "Please provide conversation history as a list of messages.", "sources": [], "restricted": False, "fallback": False})
 
     latest_user_message = next((msg.get("content", "").strip() for msg in reversed(messages) if msg.get("role") == "user"), None)
     if not latest_user_message:
-        return jsonify({"answer": "No user message found in conversation.", "sources": []})
+        return jsonify({"answer": "No user message found in conversation.", "sources": [], "restricted": False, "fallback": False})
 
     if contains_abuse(latest_user_message):
         return jsonify({
             "answer": "I am here to help with medical questions. Please keep the conversation respectful. How can I assist you today?",
-            "sources": []
+            "sources": [],
+            "restricted": True,
+            "fallback": False
         })
 
     greetings = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]
     if any(latest_user_message.lower().startswith(greet) for greet in greetings):
-        return jsonify({"answer": "Hi! How may I help you with your medical questions today?", "sources": []})
+        return jsonify({"answer": "Hi! How may I help you with your medical questions today?", "sources": [], "restricted": True, "fallback": False})
 
     last_topic = get_last_medical_topic(messages)
     search_query = rewrite_query(latest_user_message, last_topic)
@@ -189,23 +183,20 @@ def search_answer():
     extracted_types = extract_types_from_snippets(results, topic=last_topic)
     answer = generate_answer_with_sources(messages, results, last_topic=last_topic)
 
-    # Fallback if user asks about types and they aren't in initial results
     if "type" in latest_user_message.lower() and not extracted_types:
         fallback_query = f"types of {last_topic}" if last_topic else latest_user_message
-        # Search both restricted and broad
         fallback_results, _ = google_search_with_citations(fallback_query, num_results=10, broad=False)
         fallback_results_broad, _ = google_search_with_citations(fallback_query, num_results=10, broad=True)
         combined_results = fallback_results + fallback_results_broad
         answer = generate_answer_with_sources(messages, combined_results, last_topic=last_topic)
-        return jsonify({"answer": answer, "sources": combined_results})
+        return jsonify({"answer": answer, "sources": combined_results, "restricted": False, "fallback": True})
 
-    # Fallback if answer seems incomplete
     if is_answer_incomplete(answer, latest_user_message):
         fallback_results, _ = google_search_with_citations(search_query, num_results=15, broad=True)
         answer = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
-        return jsonify({"answer": answer, "sources": fallback_results})
+        return jsonify({"answer": answer, "sources": fallback_results, "restricted": False, "fallback": True})
 
-    return jsonify({"answer": answer, "sources": results})
+    return jsonify({"answer": answer, "sources": results, "restricted": True, "fallback": False})
 
 # ------------------ Serve Frontend ------------------
 @app.route("/")
@@ -216,6 +207,7 @@ def serve_index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
