@@ -6,7 +6,7 @@ import google.generativeai as genai
 import spacy
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-from better_profanity import profanity
+from better_profanity import profanity  # Lightweight automatic profanity detection
 
 # ------------------ API Keys ------------------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -166,7 +166,6 @@ def search_answer():
             "answer": "Please provide conversation history as a list of messages.",
             "sources": [],
             "restricted": False,
-            "broad": False,
             "fallback": False,
             "model_used": "none"
         })
@@ -177,7 +176,6 @@ def search_answer():
             "answer": "No user message found in conversation.",
             "sources": [],
             "restricted": False,
-            "broad": False,
             "fallback": False,
             "model_used": "none"
         })
@@ -187,7 +185,6 @@ def search_answer():
             "answer": "I am here to help with medical questions. Please keep the conversation respectful. How can I assist you today?",
             "sources": [],
             "restricted": True,
-            "broad": False,
             "fallback": False,
             "model_used": "none"
         })
@@ -198,7 +195,6 @@ def search_answer():
             "answer": "Hi! How may I help you with your medical questions today?",
             "sources": [],
             "restricted": True,
-            "broad": False,
             "fallback": False,
             "model_used": "none"
         })
@@ -206,12 +202,10 @@ def search_answer():
     last_topic = get_last_medical_topic(messages)
     search_query = rewrite_query(latest_user_message, last_topic)
 
-    # First try restricted search
     results, _ = google_search_with_citations(search_query, num_results=5, broad=False)
     extracted_types = extract_types_from_snippets(results, topic=last_topic)
     answer, model_used = generate_answer_with_sources(messages, results, last_topic=last_topic)
 
-    # Case 1: Types fallback
     if "type" in latest_user_message.lower() and not extracted_types:
         fallback_query = f"types of {last_topic}" if last_topic else latest_user_message
         fallback_results, _ = google_search_with_citations(fallback_query, num_results=10, broad=False)
@@ -222,12 +216,10 @@ def search_answer():
             "answer": answer,
             "sources": combined_results,
             "restricted": False,
-            "broad": True,
             "fallback": True,
             "model_used": model_used
         })
 
-    # Case 2: Incomplete answer fallback
     if is_answer_incomplete(answer, latest_user_message):
         fallback_results, _ = google_search_with_citations(search_query, num_results=15, broad=True)
         answer, model_used = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
@@ -235,17 +227,14 @@ def search_answer():
             "answer": answer,
             "sources": fallback_results,
             "restricted": False,
-            "broad": True,
             "fallback": True,
             "model_used": model_used
         })
 
-    # Normal restricted flow
     return jsonify({
         "answer": answer,
         "sources": results,
         "restricted": True,
-        "broad": False,
         "fallback": False,
         "model_used": model_used
     })
