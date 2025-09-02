@@ -34,7 +34,7 @@ def contains_abuse(text):
     return profanity.contains_profanity(text)
 
 # ------------------ Google Search ------------------
-def google_search_with_citations(query, num_results=5, broad=False):
+def google_search_with_citations(query, num_results=5, broad=False, topic=None):
     if not GOOGLE_SEARCH_KEY:
         return [], ""
     cx = GOOGLE_SEARCH_CX_BROAD if broad else GOOGLE_SEARCH_CX_RESTRICTED
@@ -49,11 +49,17 @@ def google_search_with_citations(query, num_results=5, broad=False):
         print(f"Google Search API error: {e}")
         return [], ""
     results = []
-    for i, item in enumerate(data.get("items", []), start=1):
+    for item in data.get("items", []):
+        title = item.get("title", "")
+        snippet = item.get("snippet", "")
+        link = item.get("link", "")
+        # 🔥 filter: must mention topic if provided
+        if topic and topic.lower() not in (title + snippet + link).lower():
+            continue
         results.append({
-            "title": item.get("title", ""),
-            "snippet": item.get("snippet", ""),
-            "link": item.get("link", "")
+            "title": title,
+            "snippet": snippet,
+            "link": link
         })
     return results, ""
 
@@ -80,22 +86,9 @@ def extract_types_from_snippets(results, topic=None):
     return "\n".join(types_texts)
 
 def generate_answer_with_sources(messages, results, last_topic=None):
-    # ✅ Filter out irrelevant results (must mention last_topic if available)
-    if last_topic:
-        filtered_results = [
-            r for r in results
-            if last_topic.lower() in r.get("title", "").lower() or last_topic.lower() in r.get("snippet", "").lower()
-        ]
-    else:
-        filtered_results = results
-
-    if not filtered_results:
-        filtered_results = results
-
-    extracted_types = extract_types_from_snippets(filtered_results, topic=last_topic)
-
+    extracted_types = extract_types_from_snippets(results, topic=last_topic)
     formatted_results_text = ""
-    for idx, item in enumerate(filtered_results, start=1):
+    for idx, item in enumerate(results, start=1):
         formatted_results_text += f"[{idx}] {item['title']}\n{item['snippet']}\nSource: {item['link']}\n\n"
 
     system_prompt = (
@@ -109,10 +102,8 @@ def generate_answer_with_sources(messages, results, last_topic=None):
         "If you cannot find a clear answer, politely say you don't know and recommend consulting a healthcare professional. "
         "Cite your sources with numbers like [1], [2], etc.\n\n"
     )
-
     if extracted_types:
         system_prompt += f"Here are some types or categories extracted from the search results:\n{extracted_types}\n\n"
-
     system_prompt += f"{formatted_results_text}\n"
 
     openai_messages = [{"role": "system", "content": system_prompt}]
@@ -217,14 +208,14 @@ def search_answer():
     last_topic = get_last_medical_topic(messages)
     search_query = rewrite_query(latest_user_message, last_topic)
 
-    results, _ = google_search_with_citations(search_query, num_results=5, broad=False)
+    results, _ = google_search_with_citations(search_query, num_results=5, broad=False, topic=last_topic)
     extracted_types = extract_types_from_snippets(results, topic=last_topic)
     answer, model_used = generate_answer_with_sources(messages, results, last_topic=last_topic)
 
     if "type" in latest_user_message.lower() and not extracted_types:
         fallback_query = f"types of {last_topic}" if last_topic else latest_user_message
-        fallback_results, _ = google_search_with_citations(fallback_query, num_results=10, broad=False)
-        fallback_results_broad, _ = google_search_with_citations(fallback_query, num_results=10, broad=True)
+        fallback_results, _ = google_search_with_citations(fallback_query, num_results=10, broad=False, topic=last_topic)
+        fallback_results_broad, _ = google_search_with_citations(fallback_query, num_results=10, broad=True, topic=last_topic)
         combined_results = fallback_results + fallback_results_broad
         answer, model_used = generate_answer_with_sources(messages, combined_results, last_topic=last_topic)
         return jsonify({
@@ -236,7 +227,7 @@ def search_answer():
         })
 
     if is_answer_incomplete(answer, latest_user_message):
-        fallback_results, _ = google_search_with_citations(search_query, num_results=15, broad=True)
+        fallback_results, _ = google_search_with_citations(search_query, num_results=15, broad=True, topic=last_topic)
         answer, model_used = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
         return jsonify({
             "answer": answer,
@@ -263,6 +254,7 @@ def serve_index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
