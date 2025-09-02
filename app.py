@@ -68,45 +68,15 @@ def is_answer_incomplete(answer_text, user_query):
             return True
     return False
 
-def classify_topic_domain(topic: str) -> str:
-    """
-    Classify topic as 'medical' or 'general'.
-    """
-    if not topic:
-        return "general"
-    doc = nlp(topic)
-    for ent in doc.ents:
-        if ent.label_ in {"DISEASE", "DISORDER", "SYMPTOM", "CONDITION"}:
-            return "medical"
-    return "general"
-
-def extract_types_from_snippets(results, topic=None, domain="general"):
-    """
-    Extract types from search snippets while filtering by topic and domain.
-    """
+def extract_types_from_snippets(results, topic=None):
     types_texts = []
-    if not topic:
-        return ""
-
-    pattern = re.compile(
-        r"\b(type|types|kind|kinds|subtype|subtypes|category|categories)\b",
-        re.IGNORECASE
-    )
-
-    topic_lower = topic.lower()
+    pattern = re.compile(r"\b(type|types|kind|kinds|subtype|subtypes|category|categories) of ([\w\s,]+?)(?:[.;]|$)", re.IGNORECASE)
     for res in results:
-        snippet = res.get("snippet", "").lower()
-        if topic_lower not in snippet:  # strict topic filtering (Option 2)
-            continue
-
-        if pattern.search(snippet):
-            if domain == "medical":
-                if not any(x in res.get("link", "").lower() for x in [
-                    "cdc.gov", "nih.gov", "mayo", "medlineplus", "who.int", "healthline"
-                ]):
-                    continue
-            types_texts.append(res.get("snippet", "").strip())
-
+        snippet = res.get("snippet", "")
+        for match in pattern.finditer(snippet):
+            types_str = match.group(2).strip()
+            if not topic or topic.lower() in types_str.lower():
+                types_texts.append(types_str)
     return "\n".join(types_texts)
 
 def generate_answer_with_sources(messages, results, last_topic=None):
@@ -116,13 +86,14 @@ def generate_answer_with_sources(messages, results, last_topic=None):
         formatted_results_text += f"[{idx}] {item['title']}\n{item['snippet']}\nSource: {item['link']}\n\n"
 
     system_prompt = (
-        "You are a helpful and knowledgeable assistant chatbot. "
-        "Provide concise, clear answers based strictly on the following web search results. "
-        "Avoid irrelevant details and focus on directly answering the user's question. "
-        "When the user uses pronouns like 'it', 'those', or 'explain that', "
-        "infer they mean the most recent topic discussed earlier in the conversation. "
+        "You are a helpful and knowledgeable medical assistant chatbot. "
+        "Provide concise, clear, and medically relevant answers based strictly on the following web search results. "
+        "Avoid unnecessary details and focus on directly answering the user's question. "
+        "When the user uses pronouns like 'it', 'those', 'these', or says 'explain that', "
+        "infer that they mean the most recent medical topic or condition discussed earlier in the conversation. "
         "Always keep track of conversational context carefully. "
-        "If you cannot find a clear answer, politely say you don't know. "
+        "Answer the user's questions based on the following web search results. "
+        "If you cannot find a clear answer, politely say you don't know and recommend consulting a healthcare professional. "
         "Cite your sources with numbers like [1], [2], etc.\n\n"
     )
     if extracted_types:
@@ -157,7 +128,7 @@ def generate_answer_with_sources(messages, results, last_topic=None):
         except Exception as e:
             return f"Gemini error: {e}", "gemini"
 
-    return "I don't know. Please consult a professional.", "none"
+    return "I don't know. Please consult a medical professional.", "none"
 
 def get_last_medical_topic(messages):
     for msg in reversed(messages):
@@ -211,7 +182,7 @@ def search_answer():
 
     if contains_abuse(latest_user_message):
         return jsonify({
-            "answer": "I am here to help with your questions. Please keep the conversation respectful.",
+            "answer": "I am here to help with medical questions. Please keep the conversation respectful. How can I assist you today?",
             "sources": [],
             "restricted": True,
             "fallback": False,
@@ -221,7 +192,7 @@ def search_answer():
     greetings = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]
     if any(latest_user_message.lower().startswith(greet) for greet in greetings):
         return jsonify({
-            "answer": "Hi! How may I help you with your questions today?",
+            "answer": "Hi! How may I help you with your medical questions today?",
             "sources": [],
             "restricted": True,
             "fallback": False,
@@ -231,10 +202,8 @@ def search_answer():
     last_topic = get_last_medical_topic(messages)
     search_query = rewrite_query(latest_user_message, last_topic)
 
-    domain = classify_topic_domain(last_topic or latest_user_message)
-
     results, _ = google_search_with_citations(search_query, num_results=5, broad=False)
-    extracted_types = extract_types_from_snippets(results, topic=last_topic, domain=domain)
+    extracted_types = extract_types_from_snippets(results, topic=last_topic)
     answer, model_used = generate_answer_with_sources(messages, results, last_topic=last_topic)
 
     if "type" in latest_user_message.lower() and not extracted_types:
@@ -242,10 +211,7 @@ def search_answer():
         fallback_results, _ = google_search_with_citations(fallback_query, num_results=10, broad=False)
         fallback_results_broad, _ = google_search_with_citations(fallback_query, num_results=10, broad=True)
         combined_results = fallback_results + fallback_results_broad
-
-        extracted_types = extract_types_from_snippets(combined_results, topic=last_topic, domain=domain)
         answer, model_used = generate_answer_with_sources(messages, combined_results, last_topic=last_topic)
-
         return jsonify({
             "answer": answer,
             "sources": combined_results,
@@ -282,6 +248,12 @@ def serve_index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
+
+
+
+
+
+
 
 
 
