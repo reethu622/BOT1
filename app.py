@@ -80,9 +80,22 @@ def extract_types_from_snippets(results, topic=None):
     return "\n".join(types_texts)
 
 def generate_answer_with_sources(messages, results, last_topic=None):
-    extracted_types = extract_types_from_snippets(results, topic=last_topic)
+    # ✅ Filter out irrelevant results (must mention last_topic if available)
+    if last_topic:
+        filtered_results = [
+            r for r in results
+            if last_topic.lower() in r.get("title", "").lower() or last_topic.lower() in r.get("snippet", "").lower()
+        ]
+    else:
+        filtered_results = results
+
+    if not filtered_results:
+        filtered_results = results
+
+    extracted_types = extract_types_from_snippets(filtered_results, topic=last_topic)
+
     formatted_results_text = ""
-    for idx, item in enumerate(results, start=1):
+    for idx, item in enumerate(filtered_results, start=1):
         formatted_results_text += f"[{idx}] {item['title']}\n{item['snippet']}\nSource: {item['link']}\n\n"
 
     system_prompt = (
@@ -96,8 +109,10 @@ def generate_answer_with_sources(messages, results, last_topic=None):
         "If you cannot find a clear answer, politely say you don't know and recommend consulting a healthcare professional. "
         "Cite your sources with numbers like [1], [2], etc.\n\n"
     )
+
     if extracted_types:
         system_prompt += f"Here are some types or categories extracted from the search results:\n{extracted_types}\n\n"
+
     system_prompt += f"{formatted_results_text}\n"
 
     openai_messages = [{"role": "system", "content": system_prompt}]
@@ -248,6 +263,7 @@ def serve_index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
