@@ -206,13 +206,8 @@ def search_answer():
     extracted_types = extract_types_from_snippets(results, topic=last_topic)
     answer, model_used = generate_answer_with_sources(messages, results, last_topic=last_topic)
 
-    # ✅ Improved fallback logic for type-related queries
     if "type" in latest_user_message.lower() and not extracted_types:
-        if last_topic:
-            fallback_query = f"types of {last_topic}"
-        else:
-            fallback_query = f"types of medical conditions related to {latest_user_message}"
-
+        fallback_query = f"types of {last_topic}" if last_topic else latest_user_message
         fallback_results, _ = google_search_with_citations(fallback_query, num_results=10, broad=False)
         fallback_results_broad, _ = google_search_with_citations(fallback_query, num_results=10, broad=True)
         combined_results = fallback_results + fallback_results_broad
@@ -253,6 +248,12 @@ def serve_index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
+
+
+
+
+
+
 
 
 
