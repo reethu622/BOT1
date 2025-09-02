@@ -75,24 +75,14 @@ def extract_types_from_snippets(results, topic=None):
         snippet = res.get("snippet", "")
         for match in pattern.finditer(snippet):
             types_str = match.group(2).strip()
-            # ✅ Only filter if topic exists
             if not topic or topic.lower() in types_str.lower():
                 types_texts.append(types_str)
     return "\n".join(types_texts)
 
 def generate_answer_with_sources(messages, results, last_topic=None):
     extracted_types = extract_types_from_snippets(results, topic=last_topic)
-
-    # ✅ If last_topic exists, filter results; otherwise keep all (Option 1 fix)
-    if last_topic:
-        filtered_results = [r for r in results if last_topic.lower() in (r["title"] + " " + r["snippet"]).lower()]
-        if not filtered_results:
-            filtered_results = results
-    else:
-        filtered_results = results
-
     formatted_results_text = ""
-    for idx, item in enumerate(filtered_results, start=1):
+    for idx, item in enumerate(results, start=1):
         formatted_results_text += f"[{idx}] {item['title']}\n{item['snippet']}\nSource: {item['link']}\n\n"
 
     system_prompt = (
@@ -216,8 +206,13 @@ def search_answer():
     extracted_types = extract_types_from_snippets(results, topic=last_topic)
     answer, model_used = generate_answer_with_sources(messages, results, last_topic=last_topic)
 
+    # ✅ Improved fallback logic for type-related queries
     if "type" in latest_user_message.lower() and not extracted_types:
-        fallback_query = f"types of {last_topic}" if last_topic else latest_user_message
+        if last_topic:
+            fallback_query = f"types of {last_topic}"
+        else:
+            fallback_query = f"types of medical conditions related to {latest_user_message}"
+
         fallback_results, _ = google_search_with_citations(fallback_query, num_results=10, broad=False)
         fallback_results_broad, _ = google_search_with_citations(fallback_query, num_results=10, broad=True)
         combined_results = fallback_results + fallback_results_broad
@@ -244,7 +239,7 @@ def search_answer():
     return jsonify({
         "answer": answer,
         "sources": results,
-        "restricted": False,  # ✅ allow showing full results when no last_topic
+        "restricted": True,
         "fallback": False,
         "model_used": model_used
     })
@@ -258,6 +253,7 @@ def serve_index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
