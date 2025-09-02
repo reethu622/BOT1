@@ -34,7 +34,7 @@ def contains_abuse(text):
     return profanity.contains_profanity(text)
 
 # ------------------ Google Search ------------------
-def google_search_with_citations(query, num_results=5, broad=False, topic=None):
+def google_search_with_citations(query, num_results=5, broad=False):
     if not GOOGLE_SEARCH_KEY:
         return [], ""
     cx = GOOGLE_SEARCH_CX_BROAD if broad else GOOGLE_SEARCH_CX_RESTRICTED
@@ -49,17 +49,11 @@ def google_search_with_citations(query, num_results=5, broad=False, topic=None):
         print(f"Google Search API error: {e}")
         return [], ""
     results = []
-    for item in data.get("items", []):
-        title = item.get("title", "")
-        snippet = item.get("snippet", "")
-        link = item.get("link", "")
-        # 🔥 filter: must mention topic if provided
-        if topic and topic.lower() not in (title + snippet + link).lower():
-            continue
+    for i, item in enumerate(data.get("items", []), start=1):
         results.append({
-            "title": title,
-            "snippet": snippet,
-            "link": link
+            "title": item.get("title", ""),
+            "snippet": item.get("snippet", ""),
+            "link": item.get("link", "")
         })
     return results, ""
 
@@ -81,14 +75,24 @@ def extract_types_from_snippets(results, topic=None):
         snippet = res.get("snippet", "")
         for match in pattern.finditer(snippet):
             types_str = match.group(2).strip()
+            # ✅ Only filter if topic exists
             if not topic or topic.lower() in types_str.lower():
                 types_texts.append(types_str)
     return "\n".join(types_texts)
 
 def generate_answer_with_sources(messages, results, last_topic=None):
     extracted_types = extract_types_from_snippets(results, topic=last_topic)
+
+    # ✅ If last_topic exists, filter results; otherwise keep all (Option 1 fix)
+    if last_topic:
+        filtered_results = [r for r in results if last_topic.lower() in (r["title"] + " " + r["snippet"]).lower()]
+        if not filtered_results:
+            filtered_results = results
+    else:
+        filtered_results = results
+
     formatted_results_text = ""
-    for idx, item in enumerate(results, start=1):
+    for idx, item in enumerate(filtered_results, start=1):
         formatted_results_text += f"[{idx}] {item['title']}\n{item['snippet']}\nSource: {item['link']}\n\n"
 
     system_prompt = (
@@ -208,14 +212,14 @@ def search_answer():
     last_topic = get_last_medical_topic(messages)
     search_query = rewrite_query(latest_user_message, last_topic)
 
-    results, _ = google_search_with_citations(search_query, num_results=5, broad=False, topic=last_topic)
+    results, _ = google_search_with_citations(search_query, num_results=5, broad=False)
     extracted_types = extract_types_from_snippets(results, topic=last_topic)
     answer, model_used = generate_answer_with_sources(messages, results, last_topic=last_topic)
 
     if "type" in latest_user_message.lower() and not extracted_types:
         fallback_query = f"types of {last_topic}" if last_topic else latest_user_message
-        fallback_results, _ = google_search_with_citations(fallback_query, num_results=10, broad=False, topic=last_topic)
-        fallback_results_broad, _ = google_search_with_citations(fallback_query, num_results=10, broad=True, topic=last_topic)
+        fallback_results, _ = google_search_with_citations(fallback_query, num_results=10, broad=False)
+        fallback_results_broad, _ = google_search_with_citations(fallback_query, num_results=10, broad=True)
         combined_results = fallback_results + fallback_results_broad
         answer, model_used = generate_answer_with_sources(messages, combined_results, last_topic=last_topic)
         return jsonify({
@@ -227,7 +231,7 @@ def search_answer():
         })
 
     if is_answer_incomplete(answer, latest_user_message):
-        fallback_results, _ = google_search_with_citations(search_query, num_results=15, broad=True, topic=last_topic)
+        fallback_results, _ = google_search_with_citations(search_query, num_results=15, broad=True)
         answer, model_used = generate_answer_with_sources(messages, fallback_results, last_topic=last_topic)
         return jsonify({
             "answer": answer,
@@ -240,7 +244,7 @@ def search_answer():
     return jsonify({
         "answer": answer,
         "sources": results,
-        "restricted": True,
+        "restricted": False,  # ✅ allow showing full results when no last_topic
         "fallback": False,
         "model_used": model_used
     })
@@ -254,6 +258,7 @@ def serve_index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
